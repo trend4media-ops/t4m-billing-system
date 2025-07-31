@@ -107,3 +107,13 @@ uploads/
 logs/
 *.log 
 .vercel
+
+# Node & build artifacts
+**/node_modules/
+**/out/
+**/dist/
+.env*
+.DS_Store
+
+# Archived extras
+docs/archive/
