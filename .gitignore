@@ -129,3 +129,15 @@ docs/archive/
 
 # Misc
 .DS_Store
+
+# Build & deps
+**/node_modules/
+**/.next/
+**/out/
+**/dist/
+
+# Archiv
+docs/archive/
+
+# Sonstiges
+.DS_Store
