@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "trend4media-frontend/package.json", "use": "@vercel/next" }
+  ],
+  "routes": [
+    { "src": "/(.*)", "dest": "/trend4media-frontend/$1" }
+  ]
+} 

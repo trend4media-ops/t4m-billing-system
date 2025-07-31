@@ -1,0 +1,221 @@
+name: Deploy Backend to Production
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'Dockerfile'
+      - '.github/workflows/deploy-backend.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'package.json'
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: trend4media/backend
+
+jobs:
+  test:
+    name: Test Backend
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_USER: test_user
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Run type check
+        run: npx tsc --noEmit
+
+      - name: Run tests
+        run: npm run test
+        env:
+          NODE_ENV: test
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USERNAME: test_user
+          DB_PASSWORD: test_password
+          DB_NAME: test_db
+          JWT_SECRET: test-jwt-secret-for-ci
+
+      - name: Run e2e tests
+        run: npm run test:e2e
+        env:
+          NODE_ENV: test
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USERNAME: test_user
+          DB_PASSWORD: test_password
+          DB_NAME: test_db
+          JWT_SECRET: test-jwt-secret-for-ci
+
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+  deploy-heroku:
+    name: Deploy to Heroku
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Heroku
+        uses: akhileshns/heroku-deploy@v3.13.15
+        with:
+          heroku_api_key: ${{ secrets.HEROKU_API_KEY }}
+          heroku_app_name: ${{ secrets.HEROKU_APP_NAME }}
+          heroku_email: ${{ secrets.HEROKU_EMAIL }}
+          usedocker: true
+          docker_heroku_process_type: web
+        env:
+          HD_NODE_ENV: production
+          HD_DB_HOST: ${{ secrets.HEROKU_DB_HOST }}
+          HD_DB_PORT: ${{ secrets.HEROKU_DB_PORT }}
+          HD_DB_USERNAME: ${{ secrets.HEROKU_DB_USERNAME }}
+          HD_DB_PASSWORD: ${{ secrets.HEROKU_DB_PASSWORD }}
+          HD_DB_NAME: ${{ secrets.HEROKU_DB_NAME }}
+          HD_JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          HD_JWT_EXPIRES_IN: "24h"
+          HD_ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          HD_ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+
+  health-check:
+    name: Post-Deployment Health Check
+    runs-on: ubuntu-latest
+    needs: [deploy-heroku]
+    if: success()
+    
+    steps:
+      - name: Wait for deployment
+        run: sleep 30
+
+      - name: Health Check - Custom Domain
+        run: |
+          echo "🔍 Checking Custom Domain Health..."
+          if curl -f https://api.trend4media.com/auth/health; then
+            echo "✅ Custom Domain (api.trend4media.com) is healthy"
+          else
+            echo "⚠️ Custom Domain check failed, trying legacy URL..."
+            curl -f https://${{ secrets.HEROKU_APP_NAME }}.herokuapp.com/auth/health
+            echo "✅ Legacy URL is healthy"
+          fi
+
+      - name: API Documentation Check
+        run: |
+          echo "📚 Checking API Documentation..."
+          if curl -I https://api.trend4media.com/api/docs | grep -q "200 OK"; then
+            echo "✅ API Documentation accessible on Custom Domain"
+          else
+            echo "⚠️ Checking legacy API docs..."
+            curl -I https://${{ secrets.HEROKU_APP_NAME }}.herokuapp.com/api/docs
+          fi
+
+  notify-success:
+    name: Notify Deployment Success
+    runs-on: ubuntu-latest
+    needs: [health-check]
+    if: success()
+    
+    steps:
+      - name: Deployment Success Notification
+        run: |
+          echo "🚀 Backend successfully deployed to production!"
+          echo ""
+          echo "🌐 Custom Domain URLs:"
+          echo "   Backend API: https://api.trend4media.com"
+          echo "   Health Check: https://api.trend4media.com/auth/health"
+          echo "   API Docs: https://api.trend4media.com/api/docs"
+          echo ""
+          echo "🔄 Legacy URLs (for transition):"
+          echo "   Backend API: https://${{ secrets.HEROKU_APP_NAME }}.herokuapp.com"
+          echo "   Health Check: https://${{ secrets.HEROKU_APP_NAME }}.herokuapp.com/auth/health"
+          echo "   API Docs: https://${{ secrets.HEROKU_APP_NAME }}.herokuapp.com/api/docs"
+          echo ""
+          echo "✅ All systems operational!"
+
+  notify-failure:
+    name: Notify Deployment Failure
+    runs-on: ubuntu-latest
+    needs: [deploy-heroku]
+    if: failure()
+    
+    steps:
+      - name: Deployment Failure Notification
+        run: |
+          echo "❌ Backend deployment failed!"
+          echo "Check the workflow logs for details."
+          echo "Verify Custom Domain configuration if health checks fail."
+          exit 1 
