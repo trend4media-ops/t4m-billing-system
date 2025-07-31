@@ -117,3 +117,15 @@ logs/
 
 # Archived extras
 docs/archive/
+
+# Node & build artifacts
+**/node_modules/
+**/.next/
+**/out/
+**/dist/
+
+# Archive extras
+docs/archive/
+
+# Misc
+.DS_Store
