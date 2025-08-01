@@ -4,9 +4,10 @@
   "description": "T4M Billing and Commission Management System",
   "main": "trend4media-backend/dist/main.js",
   "scripts": {
-    "build": "cd trend4media-backend && npm run build",
+    "build": "cd trend4media-backend && npm ci && npm run build",
     "start": "cd trend4media-backend && npm run start:prod",
     "start:dev": "cd trend4media-backend && npm run start:dev",
+    "install": "cd trend4media-backend && npm ci",
     "install-backend": "cd trend4media-backend && npm install",
     "install-frontend": "cd trend4media-frontend && npm install",
     "heroku-postbuild": "chmod +x heroku-postbuild.sh && ./heroku-postbuild.sh"
