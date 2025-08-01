@@ -21,4 +21,10 @@ e2e-integration-test.sh
 .git/
 .github/
 
+# FORCE IGNORE ALL DOCKER FILES
+Dockerfile*
+.dockerignore
+docker-compose*
+*.dockerfile
+
 # Keep only backend, src (shared), and config files 
