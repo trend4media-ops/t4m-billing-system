@@ -12,15 +12,30 @@
     "install-frontend": "cd trend4media-frontend && npm install",
     "heroku-postbuild": "chmod +x heroku-postbuild.sh && ./heroku-postbuild.sh"
   },
+  "devDependencies": {},
   "repository": {
     "type": "git",
-    "url": "https://github.com/trend4media-ops/t4m-billing-system.git"
+    "url": "git+https://github.com/trend4media-ops/t4m-billing-system.git"
   },
-  "keywords": ["billing", "commission", "management", "nestjs", "nextjs"],
+  "keywords": [
+    "billing",
+    "commission",
+    "management",
+    "nestjs",
+    "nextjs"
+  ],
   "author": "trend4media GmbH",
   "license": "PROPRIETARY",
   "engines": {
     "node": ">=18.0.0",
     "npm": ">=9.0.0"
-  }
-} 
+  },
+  "directories": {
+    "doc": "docs"
+  },
+  "types": "./trend4media-backend/dist/main.d.ts",
+  "bugs": {
+    "url": "https://github.com/trend4media-ops/t4m-billing-system/issues"
+  },
+  "homepage": "https://github.com/trend4media-ops/t4m-billing-system#readme"
+}

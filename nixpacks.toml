@@ -1,9 +1,12 @@
 # Railway Nixpacks Configuration
+[variables]
+NODE_ENV = "production"
+
 [phases.setup]
 nixPkgs = ["nodejs-18_x", "npm-9_x"]
 
 [phases.install]
-cmds = ["cd trend4media-backend && npm ci"]
+cmds = ["cd trend4media-backend && npm ci --production=false"]
 
 [phases.build]
 cmds = ["cd trend4media-backend && npm run build"]

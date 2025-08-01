@@ -1,9 +1,14 @@
 [build]
 builder = "NIXPACKS"
+buildCommand = "cd trend4media-backend && npm ci && npm run build"
+watchPaths = ["trend4media-backend/**"]
 
 [deploy]
 startCommand = "cd trend4media-backend && npm run start:prod"
 healthcheckPath = "/health"
 healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 10 
+restartPolicyMaxRetries = 10
+
+[variables]
+NODE_ENV = "production" 

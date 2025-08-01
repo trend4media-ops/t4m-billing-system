@@ -1,0 +1,25 @@
+{
+  "variables": {
+    "NODE_ENV": "production"
+  },
+  "phases": {
+    "setup": {
+      "nixPkgs": ["nodejs-18_x", "npm-9_x"]
+    },
+    "install": {
+      "cmds": [
+        "cd trend4media-backend",
+        "npm ci --production=false"
+      ]
+    },
+    "build": {
+      "cmds": [
+        "cd trend4media-backend",
+        "npm run build"
+      ]
+    }
+  },
+  "start": {
+    "cmd": "cd trend4media-backend && npm run start:prod"
+  }
+} 
