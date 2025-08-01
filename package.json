@@ -8,7 +8,8 @@
     "start": "cd trend4media-backend && npm run start:prod",
     "start:dev": "cd trend4media-backend && npm run start:dev",
     "install-backend": "cd trend4media-backend && npm install",
-    "install-frontend": "cd trend4media-frontend && npm install"
+    "install-frontend": "cd trend4media-frontend && npm install",
+    "heroku-postbuild": "chmod +x heroku-postbuild.sh && ./heroku-postbuild.sh"
   },
   "repository": {
     "type": "git",
