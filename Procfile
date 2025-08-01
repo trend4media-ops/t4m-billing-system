@@ -1,1 +1,0 @@
-web: cd trend4media-backend && npm run start:prod 
