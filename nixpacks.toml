@@ -1,0 +1,17 @@
+# Nixpacks Configuration for T4M Billing System Backend
+# This tells Railway to automatically build from the trend4media-backend directory
+
+[variables]
+NIXPACKS_PKGS_PATH = "trend4media-backend"
+
+[phases.setup]
+nixPkgs = ["nodejs-18_x", "npm-9_x"]
+
+[phases.install]
+cmds = ["cd trend4media-backend && npm ci"]
+
+[phases.build]  
+cmds = ["cd trend4media-backend && npm run build"]
+
+[start]
+cmd = "cd trend4media-backend && npm run start:prod" 

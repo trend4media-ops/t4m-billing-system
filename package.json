@@ -1,0 +1,24 @@
+{
+  "name": "t4m-billing-system",
+  "version": "1.0.0",
+  "description": "T4M Billing and Commission Management System",
+  "main": "trend4media-backend/dist/main.js",
+  "scripts": {
+    "build": "cd trend4media-backend && npm run build",
+    "start": "cd trend4media-backend && npm run start:prod",
+    "start:dev": "cd trend4media-backend && npm run start:dev",
+    "install-backend": "cd trend4media-backend && npm install",
+    "install-frontend": "cd trend4media-frontend && npm install"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trend4media-ops/t4m-billing-system.git"
+  },
+  "keywords": ["billing", "commission", "management", "nestjs", "nextjs"],
+  "author": "trend4media GmbH",
+  "license": "PROPRIETARY",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+} 

@@ -1,0 +1,24 @@
+# Ignore frontend directory for backend deployment
+trend4media-frontend/
+
+# Ignore archive and temporary files  
+*.zip
+Archiv.zip
+node_modules/
+
+# Ignore development files
+.DS_Store
+*.log
+.env.local
+.env.development
+
+# Ignore docs and scripts not needed for production
+docs/
+scripts/
+e2e-integration-test.sh
+
+# Ignore git files
+.git/
+.github/
+
+# Keep only backend, src (shared), and config files 
