@@ -1,14 +1,11 @@
-# FORCE RAILWAY TO BUILD BACKEND DIRECTORY
-[variables]
-NIXPACKS_PKGS_PATH = "trend4media-backend"
-
+# Railway Nixpacks Configuration
 [phases.setup]
 nixPkgs = ["nodejs-18_x", "npm-9_x"]
 
 [phases.install]
 cmds = ["cd trend4media-backend && npm ci"]
 
-[phases.build]  
+[phases.build]
 cmds = ["cd trend4media-backend && npm run build"]
 
 [start]
