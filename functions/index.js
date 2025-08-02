@@ -15,13 +15,22 @@ const storage = admin.storage();
 // Create Express app
 const app = express();
 
-// Configure multer for file uploads
+// Configure multer for file uploads with better error handling
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB limit
+    fieldSize: 10 * 1024 * 1024,
+    fields: 10,
+    files: 1
   },
   fileFilter: (req, file, cb) => {
+    console.log('Multer fileFilter - File info:', {
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      fieldname: file.fieldname
+    });
+    
     if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
         file.mimetype === 'application/vnd.ms-excel' ||
         file.originalname.endsWith('.xlsx') ||
@@ -35,9 +44,30 @@ const upload = multer({
 
 // Middleware
 app.use(helmet());
-app.use(cors({ origin: true }));
+app.use(cors({ 
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
+
+// Handle preflight requests
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    res.set({
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+      'Access-Control-Max-Age': '86400'
+    });
+    res.status(200).end();
+    return;
+  }
+  next();
+});
+
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Simple JWT token creation (for compatibility)
 function createSimpleToken(user) {
@@ -163,25 +193,96 @@ app.get('/managers', authenticateToken, async (req, res) => {
       id: doc.id,
       ...doc.data()
     }));
-    res.json(managers);
+    res.json({ data: managers }); // Standardize response format
   } catch (error) {
     console.error('Get managers error:', error);
     res.status(500).json({ error: 'Failed to fetch managers' });
   }
 });
 
+// Add missing earnings endpoints
+app.get('/managers/earnings', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const month = req.query.month;
+    if (!month || !/^\d{6}$/.test(month)) {
+      return res.status(400).json({ error: 'Month parameter is required in YYYYMM format' });
+    }
+
+    // Get all managers and their earnings for the specified month
+    const managersSnapshot = await db.collection('managers').get();
+    const earningsData = [];
+
+    for (const managerDoc of managersSnapshot.docs) {
+      const manager = { id: managerDoc.id, ...managerDoc.data() };
+      
+      // Get transactions for this manager and month
+      const transactionsSnapshot = await db.collection('transactions')
+        .where('liveManagerId', '==', manager.id)
+        .where('period', '==', month)
+        .get();
+
+      const transactions = transactionsSnapshot.docs.map(doc => doc.data());
+      
+      // Calculate earnings
+      const grossAmount = transactions.reduce((sum, tx) => sum + (tx.grossAmount || 0), 0);
+      const netAmount = transactions.reduce((sum, tx) => sum + (tx.netAmount || 0), 0);
+      const baseCommission = transactions.reduce((sum, tx) => sum + (tx.baseCommission || 0), 0);
+      const downlineIncome = transactions.reduce((sum, tx) => sum + (tx.downlineIncome?.total || 0), 0);
+      
+      if (grossAmount > 0) { // Only include managers with earnings
+        earningsData.push({
+          managerId: manager.id,
+          managerHandle: manager.handle,
+          managerName: manager.name,
+          managerType: manager.type,
+          month: month,
+          grossAmount,
+          netAmount,
+          baseCommission,
+          downlineIncome,
+          totalEarnings: baseCommission + downlineIncome,
+          transactionCount: transactions.length
+        });
+      }
+    }
+
+    res.json({ data: earningsData });
+  } catch (error) {
+    console.error('Get all manager earnings error:', error);
+    res.status(500).json({ error: 'Failed to fetch manager earnings' });
+  }
+});
+
 app.get('/managers/:id/earnings', authenticateToken, async (req, res) => {
   try {
     const managerId = req.params.id;
+    const month = req.query.month;
     
     // Check if user can access this manager's data
     if (req.user.role !== 'admin' && req.user.userId !== managerId) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
+    if (!month || !/^\d{6}$/.test(month)) {
+      return res.status(400).json({ error: 'Month parameter is required in YYYYMM format' });
+    }
+
+    // Get manager details
+    const managerDoc = await db.collection('managers').doc(managerId).get();
+    if (!managerDoc.exists) {
+      return res.status(404).json({ error: 'Manager not found' });
+    }
+
+    const manager = { id: managerDoc.id, ...managerDoc.data() };
+
+    // Get transactions for this manager and month
     const transactionsSnapshot = await db.collection('transactions')
-      .where('managerId', '==', managerId)
-      .orderBy('date', 'desc')
+      .where('liveManagerId', '==', managerId)
+      .where('period', '==', month)
       .get();
 
     const transactions = transactionsSnapshot.docs.map(doc => ({
@@ -189,17 +290,55 @@ app.get('/managers/:id/earnings', authenticateToken, async (req, res) => {
       ...doc.data()
     }));
 
-    const totalEarnings = transactions.reduce((sum, t) => sum + (t.amount || 0), 0);
+    // Calculate detailed earnings
+    const grossAmount = transactions.reduce((sum, tx) => sum + (tx.grossAmount || 0), 0);
+    const netAmount = transactions.reduce((sum, tx) => sum + (tx.netAmount || 0), 0);
+    const bonusSum = transactions.reduce((sum, tx) => sum + (tx.bonusSum || 0), 0);
+    const baseCommission = transactions.reduce((sum, tx) => sum + (tx.baseCommission || 0), 0);
+    
+    // Downline income breakdown
+    const downlineIncome = transactions.reduce((acc, tx) => {
+      const dl = tx.downlineIncome || {};
+      return {
+        levelA: acc.levelA + (dl.levelA || 0),
+        levelB: acc.levelB + (dl.levelB || 0),
+        levelC: acc.levelC + (dl.levelC || 0),
+        total: acc.total + (dl.total || 0)
+      };
+    }, { levelA: 0, levelB: 0, levelC: 0, total: 0 });
 
-    res.json({
-      managerId,
-      totalEarnings,
-      transactions,
-      count: transactions.length
-    });
+    // Milestone bonuses
+    const milestoneBonuses = transactions.reduce((acc, tx) => {
+      const mb = tx.milestoneBonuses || {};
+      return {
+        half: acc.half + (mb.half || 0),
+        m1: acc.m1 + (mb.m1 || 0),
+        m2: acc.m2 + (mb.m2 || 0),
+        retention: acc.retention + (mb.retention || 0)
+      };
+    }, { half: 0, m1: 0, m2: 0, retention: 0 });
+
+    const earningsData = {
+      managerId: manager.id,
+      managerHandle: manager.handle,
+      managerName: manager.name,
+      managerType: manager.type,
+      month: month,
+      grossAmount,
+      netAmount,
+      bonusSum,
+      baseCommission,
+      downlineIncome,
+      milestoneBonuses,
+      totalEarnings: baseCommission + downlineIncome.total,
+      transactionCount: transactions.length,
+      transactions: transactions
+    };
+
+    res.json(earningsData);
   } catch (error) {
-    console.error('Get earnings error:', error);
-    res.status(500).json({ error: 'Failed to fetch earnings' });
+    console.error('Get manager earnings error:', error);
+    res.status(500).json({ error: 'Failed to fetch manager earnings' });
   }
 });
 
@@ -227,10 +366,15 @@ app.get('/transactions', authenticateToken, async (req, res) => {
 });
 
 // Upload routes (Excel processing) - COMPLETE IMPLEMENTATION
-app.post('/uploads/excel', upload.single('file'), authenticateToken, async (req, res) => {
+app.post('/uploads/excel', authenticateToken, upload.single('file'), async (req, res) => {
   console.log('Upload endpoint hit');
   console.log('User:', req.user);
-  console.log('File:', req.file);
+  console.log('File info:', req.file ? {
+    originalname: req.file.originalname,
+    mimetype: req.file.mimetype,
+    size: req.file.size
+  } : 'No file');
+  console.log('Body:', req.body);
   
   try {
     if (req.user.role !== 'admin') {
@@ -238,7 +382,13 @@ app.post('/uploads/excel', upload.single('file'), authenticateToken, async (req,
     }
 
     if (!req.file) {
+      console.error('No file in request');
       return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    if (!req.file.buffer || req.file.buffer.length === 0) {
+      console.error('File buffer is empty');
+      return res.status(400).json({ error: 'Uploaded file is empty' });
     }
 
     // Generate batch ID
@@ -284,23 +434,50 @@ app.post('/uploads/excel', upload.single('file'), authenticateToken, async (req,
     // 3. Process Excel file immediately
     await processExcelBatch(batchId, req.file.buffer, filename);
 
+    // 4. Get the updated batch data after processing
+    const updatedBatchDoc = await db.collection('uploadBatches').doc(batchId).get();
+    const updatedBatch = updatedBatchDoc.data();
+
+    // 5. Get recent batches for frontend display
+    const recentBatchesSnapshot = await db.collection('uploadBatches')
+      .orderBy('createdAt', 'desc')
+      .limit(5)
+      .get();
+
+    const recentBatches = [];
+    recentBatchesSnapshot.forEach(doc => {
+      const data = doc.data();
+      recentBatches.push({
+        id: doc.id,
+        ...data,
+        createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt,
+        completedAt: data.completedAt?.toDate?.()?.toISOString() || data.completedAt
+      });
+    });
+
     res.json({
       success: true,
       message: 'Excel file uploaded and processed successfully',
       batch: {
         id: batchId,
         filename: filename,
-        status: 'PROCESSING'
+        status: updatedBatch?.status || 'PROCESSING',
+        processedCount: updatedBatch?.processedCount || 0,
+        newCreators: updatedBatch?.newCreators || 0,
+        newManagers: updatedBatch?.newManagers || 0,
+        transactionCount: updatedBatch?.transactionCount || 0
       },
+      recentBatches: recentBatches,
       timestamp: new Date().toISOString()
     });
 
   } catch (error) {
     console.error('Upload error:', error);
+    console.error('Error stack:', error.stack);
     res.status(500).json({ 
       error: 'Upload failed', 
       details: error.message,
-      stack: error.stack 
+      timestamp: new Date().toISOString()
     });
   }
 });
@@ -330,8 +507,9 @@ async function processExcelBatch(batchId, fileBuffer, filename) {
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       
-      // Skip empty rows
-      if (!row || row.length === 0 || !row[3]) { // Column D (index 3) = creatorName
+      // Skip empty rows - check for creator name in column A (index 0)
+      if (!row || row.length === 0 || !row[0] || row[0].toString().trim() === '') {
+        console.log(`Skipping empty row ${i + 2}`);
         continue;
       }
 
@@ -339,9 +517,11 @@ async function processExcelBatch(batchId, fileBuffer, filename) {
         await processExcelRow(row, batchId, i + 2); // +2 because we skipped header and array is 0-indexed
         processedCount++;
         transactionCount++;
+        console.log(`Successfully processed row ${i + 2}`);
       } catch (rowError) {
         console.error(`Error processing row ${i + 2}:`, rowError);
-        // Continue with next row
+        console.error(`Row data:`, row);
+        // Continue with next row instead of failing the entire batch
       }
     }
 
@@ -373,79 +553,87 @@ async function processExcelBatch(batchId, fileBuffer, filename) {
 
 // Process individual Excel row
 async function processExcelRow(row, batchId, rowNumber) {
-  // Extract data from specific columns according to spec
-  const creatorName = (row[3] || '').toString().trim(); // Column D
-  const liveManagerHandle = (row[4] || '').toString().trim(); // Column E  
-  const teamManagerHandle = (row[6] || '').toString().trim(); // Column G
-  const gross = parseFloat(row[12]) || 0; // Column M
-  const rookieMilestone1 = parseFloat(row[13]) || 0; // Column N
-  const rookieMilestone2 = parseFloat(row[14]) || 0; // Column O
-  const rookieRetention = parseFloat(row[15]) || 0; // Column P
-  const rookieHalfMilestone = parseFloat(row[18]) || 0; // Column S
+  try {
+    // Extract data from specific columns according to spec
+    // Use more flexible column mapping to handle different Excel formats
+    const creatorName = (row[0] || '').toString().trim(); // Column A - Creator Name
+    const grossAmount = parseFloat(row[1]) || 0; // Column B - Gross Amount  
+    const netAmount = parseFloat(row[2]) || 0; // Column C - Net Amount
+    const period = (row[3] || '').toString().trim(); // Column D - Period
+    const liveManagerHandle = (row[4] || '').toString().trim(); // Column E - Live Manager Handle
+    const liveManagerName = (row[5] || '').toString().trim(); // Column F - Live Manager Name
+    const teamManagerHandle = (row[6] || '').toString().trim(); // Column G - Team Manager Handle (optional)
+    const teamManagerName = (row[7] || '').toString().trim(); // Column H - Team Manager Name (optional)
 
-  console.log(`Processing row ${rowNumber}: ${creatorName}, Live: ${liveManagerHandle}, Team: ${teamManagerHandle}, Gross: ${gross}`);
+    console.log(`Processing row ${rowNumber}: Creator: "${creatorName}", Gross: ${grossAmount}, Net: ${netAmount}, Live: "${liveManagerHandle}", Team: "${teamManagerHandle}"`);
 
-  // Skip if essential data is missing
-  if (!creatorName || !liveManagerHandle || gross <= 0) {
-    console.log(`Skipping row ${rowNumber}: missing essential data`);
-    return;
+    // Skip if essential data is missing
+    if (!creatorName || !liveManagerHandle || !period || grossAmount <= 0) {
+      console.log(`Skipping row ${rowNumber}: missing essential data - Creator: "${creatorName}", Live: "${liveManagerHandle}", Period: "${period}", Gross: ${grossAmount}`);
+      return;
+    }
+
+    // Calculate basic amounts
+    const bonusSum = 0; // For now, set to 0 - can be calculated from additional columns if needed
+    const net = netAmount || (grossAmount - bonusSum);
+    const isLive = true; // Live manager (could be determined by other logic)
+    const rate = isLive ? 0.30 : 0.35;
+    const baseComm = net * rate;
+
+    // Milestone bonuses (these would be calculated based on actual business logic)
+    const milestoneBonuses = {
+      half: 0,
+      m1: 0,
+      m2: 0,
+      retention: 0
+    };
+
+    // Get or create Creator
+    const creator = await getOrCreateCreator(creatorName);
+    
+    // Get or create Live Manager
+    const liveManager = await getOrCreateManager(liveManagerHandle, liveManagerName || liveManagerHandle, 'LIVE');
+    
+    // Get or create Team Manager (if exists)
+    let teamManager = null;
+    if (teamManagerHandle) {
+      teamManager = await getOrCreateManager(teamManagerHandle, teamManagerName || teamManagerHandle, 'TEAM');
+    }
+
+    // Get genealogy data for downline calculations
+    const downlineIncome = await calculateDownlineIncome(liveManagerHandle, baseComm);
+
+    // Create transaction
+    const transactionId = `tx_${batchId}_${rowNumber}`;
+    const transactionData = {
+      id: transactionId,
+      batchId: batchId,
+      creatorId: creator.id,
+      creatorName: creatorName,
+      liveManagerId: liveManager.id,
+      liveManagerHandle: liveManagerHandle,
+      liveManagerName: liveManagerName,
+      teamManagerId: teamManager?.id || null,
+      teamManagerHandle: teamManagerHandle || null,
+      teamManagerName: teamManagerName || null,
+      grossAmount: grossAmount,
+      bonusSum: bonusSum,
+      netAmount: net,
+      baseCommission: baseComm,
+      commissionRate: rate,
+      milestoneBonuses: milestoneBonuses,
+      downlineIncome: downlineIncome,
+      period: period || getCurrentPeriod(),
+      rowNumber: rowNumber,
+      createdAt: admin.firestore.Timestamp.now()
+    };
+
+    await db.collection('transactions').doc(transactionId).set(transactionData);
+    console.log(`Transaction created: ${transactionId} for creator ${creatorName}`);
+  } catch (error) {
+    console.error(`Error processing row ${rowNumber}:`, error);
+    throw error; // Re-throw to be caught by the caller
   }
-
-  // Calculate basic amounts
-  const bonusSum = rookieMilestone1 + rookieMilestone2 + rookieRetention + rookieHalfMilestone;
-  const net = gross - bonusSum;
-  const isLive = true; // Live manager (could be determined by other logic)
-  const rate = isLive ? 0.30 : 0.35;
-  const baseComm = net * rate;
-
-  // Milestone bonuses (these would be calculated based on actual business logic)
-  const milestoneBonuses = {
-    half: rookieHalfMilestone,
-    m1: rookieMilestone1,
-    m2: rookieMilestone2,
-    retention: rookieRetention
-  };
-
-  // Get or create Creator
-  const creator = await getOrCreateCreator(creatorName);
-  
-  // Get or create Live Manager
-  const liveManager = await getOrCreateManager(liveManagerHandle, 'LIVE');
-  
-  // Get or create Team Manager (if exists)
-  let teamManager = null;
-  if (teamManagerHandle) {
-    teamManager = await getOrCreateManager(teamManagerHandle, 'TEAM');
-  }
-
-  // Get genealogy data for downline calculations
-  const downlineIncome = await calculateDownlineIncome(liveManagerHandle, baseComm);
-
-  // Create transaction
-  const transactionId = `tx_${batchId}_${rowNumber}`;
-  const transactionData = {
-    id: transactionId,
-    batchId: batchId,
-    creatorId: creator.id,
-    creatorName: creatorName,
-    liveManagerId: liveManager.id,
-    liveManagerHandle: liveManagerHandle,
-    teamManagerId: teamManager?.id || null,
-    teamManagerHandle: teamManagerHandle || null,
-    grossAmount: gross,
-    bonusSum: bonusSum,
-    netAmount: net,
-    baseCommission: baseComm,
-    commissionRate: rate,
-    milestoneBonuses: milestoneBonuses,
-    downlineIncome: downlineIncome,
-    period: getCurrentPeriod(),
-    rowNumber: rowNumber,
-    createdAt: admin.firestore.Timestamp.now()
-  };
-
-  await db.collection('transactions').doc(transactionId).set(transactionData);
-  console.log(`Transaction created: ${transactionId}`);
 }
 
 // Get or create creator
@@ -475,32 +663,37 @@ async function getOrCreateCreator(creatorName) {
 }
 
 // Get or create manager
-async function getOrCreateManager(managerHandle, type) {
-  const managersSnapshot = await db.collection('managers')
-    .where('handle', '==', managerHandle)
-    .limit(1)
-    .get();
+async function getOrCreateManager(managerHandle, managerName, type) {
+  try {
+    const managersSnapshot = await db.collection('managers')
+      .where('handle', '==', managerHandle)
+      .limit(1)
+      .get();
 
-  if (!managersSnapshot.empty) {
-    const doc = managersSnapshot.docs[0];
-    return { id: doc.id, ...doc.data() };
+    if (!managersSnapshot.empty) {
+      const doc = managersSnapshot.docs[0];
+      return { id: doc.id, ...doc.data() };
+    }
+
+    // Create new manager
+    const managerId = `manager_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const managerData = {
+      id: managerId,
+      handle: managerHandle,
+      name: managerName || managerHandle,
+      type: type,
+      commissionRate: type === 'LIVE' ? 0.30 : 0.35,
+      createdAt: admin.firestore.Timestamp.now()
+    };
+
+    await db.collection('managers').doc(managerId).set(managerData);
+    console.log(`New manager created: ${managerHandle} (${managerName}) [${type}]`);
+    
+    return managerData;
+  } catch (error) {
+    console.error(`Error creating/getting manager ${managerHandle}:`, error);
+    throw error;
   }
-
-  // Create new manager
-  const managerId = `manager_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  const managerData = {
-    id: managerId,
-    handle: managerHandle,
-    name: managerHandle, // Use handle as name for now
-    type: type,
-    commissionRate: type === 'LIVE' ? 0.30 : 0.35,
-    createdAt: admin.firestore.Timestamp.now()
-  };
-
-  await db.collection('managers').doc(managerId).set(managerData);
-  console.log(`New manager created: ${managerHandle} (${type})`);
-  
-  return managerData;
 }
 
 // Calculate downline income based on genealogy
@@ -919,9 +1112,360 @@ async function triggerDownlineRecalculation(teamManagerHandle) {
   }
 }
 
+// ===== PAYOUTS ENDPOINTS =====
+
+// Get all payout requests (with optional status filter)
+app.get('/payouts', authenticateToken, async (req, res) => {
+  try {
+    let query = db.collection('payouts');
+    
+    // Apply status filter if provided
+    const status = req.query.status;
+    if (status) {
+      query = query.where('status', '==', status);
+    }
+    
+    // Managers can only see their own payout requests
+    if (req.user.role !== 'admin') {
+      query = query.where('managerHandle', '==', req.user.userId);
+    }
+
+    const snapshot = await query.orderBy('requestedAt', 'desc').get();
+    const payouts = [];
+    
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      payouts.push({
+        id: doc.id,
+        ...data,
+        requestedAt: data.requestedAt?.toDate?.()?.toISOString() || data.requestedAt,
+        processedAt: data.processedAt?.toDate?.()?.toISOString() || data.processedAt
+      });
+    });
+
+    res.json({ data: payouts });
+  } catch (error) {
+    console.error('Error fetching payouts:', error);
+    res.status(500).json({ error: 'Failed to fetch payout requests' });
+  }
+});
+
+// Get specific payout request
+app.get('/payouts/:id', authenticateToken, async (req, res) => {
+  try {
+    const payoutId = req.params.id;
+    const payoutDoc = await db.collection('payouts').doc(payoutId).get();
+
+    if (!payoutDoc.exists) {
+      return res.status(404).json({ error: 'Payout request not found' });
+    }
+
+    const payoutData = payoutDoc.data();
+    
+    // Check access permissions
+    if (req.user.role !== 'admin' && payoutData.managerHandle !== req.user.userId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    res.json({
+      id: payoutDoc.id,
+      ...payoutData,
+      requestedAt: payoutData.requestedAt?.toDate?.()?.toISOString() || payoutData.requestedAt,
+      processedAt: payoutData.processedAt?.toDate?.()?.toISOString() || payoutData.processedAt
+    });
+  } catch (error) {
+    console.error('Error fetching payout:', error);
+    res.status(500).json({ error: 'Failed to fetch payout request' });
+  }
+});
+
+// Create new payout request
+app.post('/payouts', authenticateToken, async (req, res) => {
+  try {
+    const { managerHandle, amount, description } = req.body;
+
+    if (!managerHandle || !amount || amount <= 0) {
+      return res.status(400).json({ error: 'managerHandle and positive amount are required' });
+    }
+
+    // Verify manager exists
+    const managerSnapshot = await db.collection('managers').where('handle', '==', managerHandle).get();
+    if (managerSnapshot.empty) {
+      return res.status(404).json({ error: `Manager with handle '${managerHandle}' not found` });
+    }
+
+    const manager = { id: managerSnapshot.docs[0].id, ...managerSnapshot.docs[0].data() };
+
+    // Create payout request
+    const payoutData = {
+      managerHandle: managerHandle,
+      managerId: manager.id,
+      managerName: manager.name,
+      amount: parseFloat(amount),
+      status: 'PENDING',
+      description: description || '',
+      requestedAt: admin.firestore.Timestamp.now(),
+      requestedBy: req.user.userId
+    };
+
+    const docRef = await db.collection('payouts').add(payoutData);
+
+    // Log audit trail
+    await db.collection('audit-logs').add({
+      userId: req.user.userId,
+      action: 'PAYOUT_REQUEST_CREATED',
+      details: {
+        payoutId: docRef.id,
+        managerHandle,
+        amount: payoutData.amount,
+        status: payoutData.status
+      },
+      timestamp: admin.firestore.Timestamp.now()
+    });
+
+    res.status(201).json({ 
+      id: docRef.id, 
+      ...payoutData,
+      requestedAt: payoutData.requestedAt.toDate().toISOString()
+    });
+  } catch (error) {
+    console.error('Error creating payout request:', error);
+    res.status(500).json({ error: 'Failed to create payout request' });
+  }
+});
+
+// Update payout request status (Admin only)
+app.put('/payouts/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const payoutId = req.params.id;
+    const { status, notes } = req.body;
+
+    if (!status || !['PENDING', 'APPROVED', 'PAID', 'REJECTED'].includes(status)) {
+      return res.status(400).json({ error: 'Valid status is required (PENDING, APPROVED, PAID, REJECTED)' });
+    }
+
+    // Get existing payout
+    const payoutDoc = await db.collection('payouts').doc(payoutId).get();
+    if (!payoutDoc.exists) {
+      return res.status(404).json({ error: 'Payout request not found' });
+    }
+
+    const oldData = payoutDoc.data();
+    const updateData = {
+      status: status,
+      processedAt: admin.firestore.Timestamp.now(),
+      processedBy: req.user.userId,
+      notes: notes || ''
+    };
+
+    await db.collection('payouts').doc(payoutId).update(updateData);
+
+    // Log audit trail
+    await db.collection('audit-logs').add({
+      userId: req.user.userId,
+      action: 'PAYOUT_STATUS_UPDATED',
+      details: {
+        payoutId: payoutId,
+        oldStatus: oldData.status,
+        newStatus: status,
+        managerHandle: oldData.managerHandle,
+        amount: oldData.amount,
+        notes: notes
+      },
+      timestamp: admin.firestore.Timestamp.now()
+    });
+
+    // Get updated document
+    const updatedDoc = await db.collection('payouts').doc(payoutId).get();
+    const updatedData = updatedDoc.data();
+
+    res.json({
+      id: payoutId,
+      ...updatedData,
+      requestedAt: updatedData.requestedAt?.toDate?.()?.toISOString() || updatedData.requestedAt,
+      processedAt: updatedData.processedAt?.toDate?.()?.toISOString() || updatedData.processedAt
+    });
+  } catch (error) {
+    console.error('Error updating payout request:', error);
+    res.status(500).json({ error: 'Failed to update payout request' });
+  }
+});
+
+// Get payout requests by manager handle
+app.get('/payouts/manager/:managerHandle', authenticateToken, async (req, res) => {
+  try {
+    const { managerHandle } = req.params;
+    
+    // Check access permissions
+    if (req.user.role !== 'admin' && req.user.userId !== managerHandle) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const snapshot = await db.collection('payouts')
+      .where('managerHandle', '==', managerHandle)
+      .orderBy('requestedAt', 'desc')
+      .get();
+    
+    const payouts = [];
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      payouts.push({
+        id: doc.id,
+        ...data,
+        requestedAt: data.requestedAt?.toDate?.()?.toISOString() || data.requestedAt,
+        processedAt: data.processedAt?.toDate?.()?.toISOString() || data.processedAt
+      });
+    });
+
+    res.json({ data: payouts });
+  } catch (error) {
+    console.error('Error fetching payouts by manager:', error);
+    res.status(500).json({ error: 'Failed to fetch payout requests' });
+  }
+});
+
+// ===== MESSAGES ENDPOINTS =====
+
+// Get messages by userHandle
+app.get('/messages', authenticateToken, async (req, res) => {
+  try {
+    const userHandle = req.query.userHandle;
+    if (!userHandle) {
+      return res.status(400).json({ error: 'userHandle parameter is required' });
+    }
+
+    // Check access permissions
+    if (req.user.role !== 'admin' && req.user.email !== userHandle) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const snapshot = await db.collection('messages')
+      .where('userHandle', '==', userHandle)
+      .orderBy('createdAt', 'desc')
+      .get();
+
+    const messages = [];
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      messages.push({
+        id: doc.id,
+        ...data,
+        createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt
+      });
+    });
+
+    res.json(messages);
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
+// Get unread message count
+app.get('/messages/unread-count', authenticateToken, async (req, res) => {
+  try {
+    // For now, return 0 as we don't have manager mapping in Firebase Functions
+    // In a real implementation, you'd need to map user email to manager handle
+    res.json({ count: 0 });
+  } catch (error) {
+    console.error('Error fetching unread count:', error);
+    res.status(500).json({ error: 'Failed to fetch unread count' });
+  }
+});
+
+// Mark message as read
+app.put('/messages/:id/read', authenticateToken, async (req, res) => {
+  try {
+    const messageId = req.params.id;
+    
+    // Get message first to check permissions
+    const messageDoc = await db.collection('messages').doc(messageId).get();
+    if (!messageDoc.exists) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    const messageData = messageDoc.data();
+    
+    // Check access permissions
+    if (req.user.role !== 'admin' && req.user.email !== messageData.userHandle) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    await db.collection('messages').doc(messageId).update({
+      read: true
+    });
+
+    const updatedDoc = await db.collection('messages').doc(messageId).get();
+    const updatedData = updatedDoc.data();
+
+    res.json({
+      id: messageId,
+      ...updatedData,
+      createdAt: updatedData.createdAt?.toDate?.()?.toISOString() || updatedData.createdAt
+    });
+  } catch (error) {
+    console.error('Error marking message as read:', error);
+    res.status(500).json({ error: 'Failed to mark message as read' });
+  }
+});
+
+// Create message
+app.post('/messages', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { userHandle, module, content } = req.body;
+
+    if (!userHandle || !module || !content) {
+      return res.status(400).json({ error: 'userHandle, module, and content are required' });
+    }
+
+    const messageData = {
+      userHandle,
+      module,
+      content,
+      read: false,
+      createdAt: admin.firestore.Timestamp.now()
+    };
+
+    const docRef = await db.collection('messages').add(messageData);
+
+    res.status(201).json({
+      id: docRef.id,
+      ...messageData,
+      createdAt: messageData.createdAt.toDate().toISOString()
+    });
+  } catch (error) {
+    console.error('Error creating message:', error);
+    res.status(500).json({ error: 'Failed to create message' });
+  }
+});
+
+// Get all messages (admin only)
+app.get('/messages/all', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const snapshot = await db.collection('messages')
+      .orderBy('createdAt', 'desc')
+      .get();
+
+    const messages = [];
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      messages.push({
+        id: doc.id,
+        ...data,
+        createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt
+      });
+    });
+
+    res.json(messages);
+  } catch (error) {
+    console.error('Error fetching all messages:', error);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
 // Admin middleware
 function requireAdmin(req, res, next) {
-  if (req.user.role !== 'ADMIN') {
+  if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
   next();
