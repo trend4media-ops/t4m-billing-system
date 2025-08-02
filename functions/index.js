@@ -665,6 +665,268 @@ app.get('/uploads/batches/:id/transactions', authenticateToken, async (req, res)
   }
 });
 
+// ===== GENEALOGY ENDPOINTS =====
+
+// Get all genealogy entries
+app.get('/genealogy', authenticateToken, async (req, res) => {
+  try {
+    const snapshot = await db.collection('genealogy').orderBy('assignedAt', 'desc').get();
+    const genealogies = [];
+    
+    snapshot.forEach(doc => {
+      genealogies.push({
+        id: doc.id,
+        ...doc.data(),
+        assignedAt: doc.data().assignedAt?.toDate?.()?.toISOString() || doc.data().assignedAt
+      });
+    });
+
+    res.json({ data: genealogies });
+  } catch (error) {
+    console.error('Error fetching genealogy:', error);
+    res.status(500).json({ error: 'Failed to fetch genealogy data' });
+  }
+});
+
+// Get genealogy entries by team manager handle
+app.get('/genealogy/team-handle/:handle', authenticateToken, async (req, res) => {
+  try {
+    const { handle } = req.params;
+    const snapshot = await db.collection('genealogy')
+      .where('teamManagerHandle', '==', handle)
+      .orderBy('assignedAt', 'desc')
+      .get();
+    
+    const genealogies = [];
+    snapshot.forEach(doc => {
+      genealogies.push({
+        id: doc.id,
+        ...doc.data(),
+        assignedAt: doc.data().assignedAt?.toDate?.()?.toISOString() || doc.data().assignedAt
+      });
+    });
+
+    res.json({ data: genealogies });
+  } catch (error) {
+    console.error('Error fetching genealogy by team handle:', error);
+    res.status(500).json({ error: 'Failed to fetch genealogy data' });
+  }
+});
+
+// Create genealogy entry
+app.post('/genealogy', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { teamManagerHandle, liveManagerHandle, level } = req.body;
+
+    if (!teamManagerHandle || !liveManagerHandle || !level) {
+      return res.status(400).json({ error: 'teamManagerHandle, liveManagerHandle, and level are required' });
+    }
+
+    if (!['A', 'B', 'C'].includes(level)) {
+      return res.status(400).json({ error: 'level must be A, B, or C' });
+    }
+
+    // Verify managers exist
+    const teamManagerSnapshot = await db.collection('managers').where('handle', '==', teamManagerHandle).get();
+    const liveManagerSnapshot = await db.collection('managers').where('handle', '==', liveManagerHandle).get();
+
+    if (teamManagerSnapshot.empty) {
+      return res.status(404).json({ error: `Team Manager with handle '${teamManagerHandle}' not found` });
+    }
+
+    if (liveManagerSnapshot.empty) {
+      return res.status(404).json({ error: `Live Manager with handle '${liveManagerHandle}' not found` });
+    }
+
+    const genealogyData = {
+      teamManagerHandle,
+      liveManagerHandle,
+      level,
+      assignedAt: admin.firestore.Timestamp.now()
+    };
+
+    const docRef = await db.collection('genealogy').add(genealogyData);
+
+    // Log audit trail
+    await db.collection('audit-logs').add({
+      userId: req.user.userId,
+      action: 'GENEALOGY_CREATED',
+      details: {
+        genealogyId: docRef.id,
+        teamManagerHandle,
+        liveManagerHandle,
+        level
+      },
+      timestamp: admin.firestore.Timestamp.now()
+    });
+
+    // Trigger downline recalculation
+    await triggerDownlineRecalculation(teamManagerHandle);
+
+    res.status(201).json({ 
+      id: docRef.id, 
+      ...genealogyData,
+      assignedAt: genealogyData.assignedAt.toDate().toISOString()
+    });
+  } catch (error) {
+    console.error('Error creating genealogy:', error);
+    res.status(500).json({ error: 'Failed to create genealogy entry' });
+  }
+});
+
+// Update genealogy entry
+app.put('/genealogy/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { teamManagerHandle, liveManagerHandle, level } = req.body;
+
+    // Get existing genealogy
+    const genealogyDoc = await db.collection('genealogy').doc(id).get();
+    if (!genealogyDoc.exists) {
+      return res.status(404).json({ error: 'Genealogy entry not found' });
+    }
+
+    const oldData = genealogyDoc.data();
+    const updateData = {};
+
+    if (teamManagerHandle !== undefined) {
+      // Verify team manager exists
+      const teamManagerSnapshot = await db.collection('managers').where('handle', '==', teamManagerHandle).get();
+      if (teamManagerSnapshot.empty) {
+        return res.status(404).json({ error: `Team Manager with handle '${teamManagerHandle}' not found` });
+      }
+      updateData.teamManagerHandle = teamManagerHandle;
+    }
+
+    if (liveManagerHandle !== undefined) {
+      // Verify live manager exists
+      const liveManagerSnapshot = await db.collection('managers').where('handle', '==', liveManagerHandle).get();
+      if (liveManagerSnapshot.empty) {
+        return res.status(404).json({ error: `Live Manager with handle '${liveManagerHandle}' not found` });
+      }
+      updateData.liveManagerHandle = liveManagerHandle;
+    }
+
+    if (level !== undefined) {
+      if (!['A', 'B', 'C'].includes(level)) {
+        return res.status(400).json({ error: 'level must be A, B, or C' });
+      }
+      updateData.level = level;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
+    await db.collection('genealogy').doc(id).update(updateData);
+
+    // Log audit trail
+    await db.collection('audit-logs').add({
+      userId: req.user.userId,
+      action: 'GENEALOGY_UPDATED',
+      details: {
+        genealogyId: id,
+        oldValues: oldData,
+        newValues: updateData
+      },
+      timestamp: admin.firestore.Timestamp.now()
+    });
+
+    // Trigger downline recalculation for affected managers
+    if (updateData.teamManagerHandle && updateData.teamManagerHandle !== oldData.teamManagerHandle) {
+      await triggerDownlineRecalculation(oldData.teamManagerHandle);
+      await triggerDownlineRecalculation(updateData.teamManagerHandle);
+    } else if (oldData.teamManagerHandle) {
+      await triggerDownlineRecalculation(oldData.teamManagerHandle);
+    }
+
+    // Get updated document
+    const updatedDoc = await db.collection('genealogy').doc(id).get();
+    const updatedData = updatedDoc.data();
+
+    res.json({
+      id,
+      ...updatedData,
+      assignedAt: updatedData.assignedAt?.toDate?.()?.toISOString() || updatedData.assignedAt
+    });
+  } catch (error) {
+    console.error('Error updating genealogy:', error);
+    res.status(500).json({ error: 'Failed to update genealogy entry' });
+  }
+});
+
+// Delete genealogy entry
+app.delete('/genealogy/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get existing genealogy
+    const genealogyDoc = await db.collection('genealogy').doc(id).get();
+    if (!genealogyDoc.exists) {
+      return res.status(404).json({ error: 'Genealogy entry not found' });
+    }
+
+    const genealogyData = genealogyDoc.data();
+    
+    await db.collection('genealogy').doc(id).delete();
+
+    // Log audit trail
+    await db.collection('audit-logs').add({
+      userId: req.user.userId,
+      action: 'GENEALOGY_DELETED',
+      details: {
+        genealogyId: id,
+        teamManagerHandle: genealogyData.teamManagerHandle,
+        liveManagerHandle: genealogyData.liveManagerHandle,
+        level: genealogyData.level
+      },
+      timestamp: admin.firestore.Timestamp.now()
+    });
+
+    // Trigger downline recalculation
+    if (genealogyData.teamManagerHandle) {
+      await triggerDownlineRecalculation(genealogyData.teamManagerHandle);
+    }
+
+    res.status(204).send();
+  } catch (error) {
+    console.error('Error deleting genealogy:', error);
+    res.status(500).json({ error: 'Failed to delete genealogy entry' });
+  }
+});
+
+// Helper function to trigger downline recalculation
+async function triggerDownlineRecalculation(teamManagerHandle) {
+  try {
+    // Log the need for recalculation
+    await db.collection('audit-logs').add({
+      userId: 'system',
+      action: 'DOWNLINE_RECALCULATION_TRIGGERED',
+      details: {
+        teamManagerHandle,
+        reason: 'Genealogy change',
+        timestamp: admin.firestore.Timestamp.now()
+      },
+      timestamp: admin.firestore.Timestamp.now()
+    });
+
+    // TODO: Implement actual downline income recalculation
+    // This would typically involve updating commission calculations
+    // and potentially triggering payout recalculations
+    console.log(`Downline recalculation triggered for team manager: ${teamManagerHandle}`);
+  } catch (error) {
+    console.error('Error triggering downline recalculation:', error);
+  }
+}
+
+// Admin middleware
+function requireAdmin(req, res, next) {
+  if (req.user.role !== 'ADMIN') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  next();
+}
+
 // Export the Express app as a Firebase Function
 exports.api = onRequest({ 
   region: 'europe-west1',
