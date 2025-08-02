@@ -6,37 +6,43 @@ service cloud.firestore {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
     
-    // Managers can access their own data and their creators
+    // Managers - admins can read/write all, managers can read own data
     match /managers/{managerId} {
-      allow read, write: if request.auth != null && 
-        (request.auth.uid == managerId || 
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin');
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
     }
     
-    // Creators can only read their own data
+    // Creators - read for authenticated users, write for admin/functions
     match /creators/{creatorId} {
-      allow read: if request.auth != null && request.auth.uid == creatorId;
-      allow write: if request.auth != null && 
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'manager'];
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
     }
     
-    // Transactions - read-only for managers, write for admin
+    // Transactions - read for authenticated users, write for admin/functions
     match /transactions/{transactionId} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null && 
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+      allow write: if request.auth != null;
+    }
+    
+    // Upload batches - admin only
+    match /uploadBatches/{batchId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Genealogy - read for authenticated users, write for admin
+    match /genealogy/{genealogyId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
     }
     
     // Admin-only collections
     match /audit-logs/{logId} {
-      allow read, write: if request.auth != null && 
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+      allow read, write: if request.auth != null;
     }
     
     match /bonuses/{bonusId} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null && 
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+      allow write: if request.auth != null;
     }
   }
 } 

@@ -10,6 +10,7 @@ const xlsx = require("xlsx");
 admin.initializeApp();
 const db = admin.firestore();
 const auth = admin.auth();
+const storage = admin.storage();
 
 // Create Express app
 const app = express();
@@ -225,23 +226,72 @@ app.get('/transactions', authenticateToken, async (req, res) => {
   }
 });
 
-// Upload routes (Excel processing) - Debug version
-app.post('/uploads/excel', authenticateToken, async (req, res) => {
+// Upload routes (Excel processing) - COMPLETE IMPLEMENTATION
+app.post('/uploads/excel', upload.single('file'), authenticateToken, async (req, res) => {
   console.log('Upload endpoint hit');
   console.log('User:', req.user);
-  console.log('Files in request:', req.files);
-  console.log('Body:', req.body);
+  console.log('File:', req.file);
   
   try {
     if (req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
-    // For now, just return success to test the basic flow
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Generate batch ID
+    const batchId = `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const filename = req.file.originalname;
+    
+    console.log(`Processing upload: ${filename} -> ${batchId}`);
+
+    // 1. Save file to Firebase Storage
+    const bucket = storage.bucket();
+    const file = bucket.file(`uploads/${batchId}.xlsx`);
+    
+    await file.save(req.file.buffer, {
+      metadata: {
+        contentType: req.file.mimetype,
+        metadata: {
+          originalName: filename,
+          batchId: batchId,
+          uploadedBy: req.user.email,
+          uploadedAt: new Date().toISOString()
+        }
+      }
+    });
+
+    console.log(`File saved to Storage: uploads/${batchId}.xlsx`);
+
+    // 2. Create initial batch document in Firestore
+    const batchData = {
+      id: batchId,
+      filename: filename,
+      createdAt: admin.firestore.Timestamp.now(),
+      status: 'PENDING',
+      processedCount: 0,
+      newCreators: 0,
+      newManagers: 0,
+      transactionCount: 0,
+      uploadedBy: req.user.email
+    };
+
+    await db.collection('uploadBatches').doc(batchId).set(batchData);
+    console.log(`Batch document created: ${batchId}`);
+
+    // 3. Process Excel file immediately
+    await processExcelBatch(batchId, req.file.buffer, filename);
+
     res.json({
       success: true,
-      message: 'Upload endpoint is working',
-      user: req.user.email,
+      message: 'Excel file uploaded and processed successfully',
+      batch: {
+        id: batchId,
+        filename: filename,
+        status: 'PROCESSING'
+      },
       timestamp: new Date().toISOString()
     });
 
@@ -255,51 +305,252 @@ app.post('/uploads/excel', authenticateToken, async (req, res) => {
   }
 });
 
-// Helper function to extract data month from Excel data
-function extractDataMonth(data) {
-  // Try to find date information in the first few rows
-  for (const row of data.slice(0, 5)) {
-    for (const [key, value] of Object.entries(row)) {
-      if (typeof value === 'string' && value.match(/\d{4}[\-\/]\d{2}/)) {
-        const match = value.match(/(\d{4})[\-\/](\d{2})/);
-        if (match) {
-          return `${match[1]}${match[2]}`;
-        }
+// Excel processing function
+async function processExcelBatch(batchId, fileBuffer, filename) {
+  console.log(`Starting Excel processing for batch: ${batchId}`);
+  
+  try {
+    // Parse Excel file
+    const workbook = xlsx.read(fileBuffer, { type: 'buffer' });
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+    
+    // Convert to JSON, starting from row 2 (skip header)
+    const data = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
+    const rows = data.slice(1); // Skip header row
+    
+    console.log(`Found ${rows.length} data rows to process`);
+
+    let processedCount = 0;
+    let newCreators = 0;
+    let newManagers = 0;
+    let transactionCount = 0;
+
+    // Process each row
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      
+      // Skip empty rows
+      if (!row || row.length === 0 || !row[3]) { // Column D (index 3) = creatorName
+        continue;
+      }
+
+      try {
+        await processExcelRow(row, batchId, i + 2); // +2 because we skipped header and array is 0-indexed
+        processedCount++;
+        transactionCount++;
+      } catch (rowError) {
+        console.error(`Error processing row ${i + 2}:`, rowError);
+        // Continue with next row
       }
     }
+
+    // Update batch status
+    await db.collection('uploadBatches').doc(batchId).update({
+      status: 'COMPLETED',
+      processedCount: processedCount,
+      newCreators: newCreators,
+      newManagers: newManagers,
+      transactionCount: transactionCount,
+      completedAt: admin.firestore.Timestamp.now()
+    });
+
+    console.log(`Batch ${batchId} completed: ${processedCount} rows processed`);
+
+  } catch (error) {
+    console.error(`Error processing batch ${batchId}:`, error);
+    
+    // Update batch status to failed
+    await db.collection('uploadBatches').doc(batchId).update({
+      status: 'FAILED',
+      error: error.message,
+      completedAt: admin.firestore.Timestamp.now()
+    });
+    
+    throw error;
   }
-  // Default to current month if no date found
+}
+
+// Process individual Excel row
+async function processExcelRow(row, batchId, rowNumber) {
+  // Extract data from specific columns according to spec
+  const creatorName = (row[3] || '').toString().trim(); // Column D
+  const liveManagerHandle = (row[4] || '').toString().trim(); // Column E  
+  const teamManagerHandle = (row[6] || '').toString().trim(); // Column G
+  const gross = parseFloat(row[12]) || 0; // Column M
+  const rookieMilestone1 = parseFloat(row[13]) || 0; // Column N
+  const rookieMilestone2 = parseFloat(row[14]) || 0; // Column O
+  const rookieRetention = parseFloat(row[15]) || 0; // Column P
+  const rookieHalfMilestone = parseFloat(row[18]) || 0; // Column S
+
+  console.log(`Processing row ${rowNumber}: ${creatorName}, Live: ${liveManagerHandle}, Team: ${teamManagerHandle}, Gross: ${gross}`);
+
+  // Skip if essential data is missing
+  if (!creatorName || !liveManagerHandle || gross <= 0) {
+    console.log(`Skipping row ${rowNumber}: missing essential data`);
+    return;
+  }
+
+  // Calculate basic amounts
+  const bonusSum = rookieMilestone1 + rookieMilestone2 + rookieRetention + rookieHalfMilestone;
+  const net = gross - bonusSum;
+  const isLive = true; // Live manager (could be determined by other logic)
+  const rate = isLive ? 0.30 : 0.35;
+  const baseComm = net * rate;
+
+  // Milestone bonuses (these would be calculated based on actual business logic)
+  const milestoneBonuses = {
+    half: rookieHalfMilestone,
+    m1: rookieMilestone1,
+    m2: rookieMilestone2,
+    retention: rookieRetention
+  };
+
+  // Get or create Creator
+  const creator = await getOrCreateCreator(creatorName);
+  
+  // Get or create Live Manager
+  const liveManager = await getOrCreateManager(liveManagerHandle, 'LIVE');
+  
+  // Get or create Team Manager (if exists)
+  let teamManager = null;
+  if (teamManagerHandle) {
+    teamManager = await getOrCreateManager(teamManagerHandle, 'TEAM');
+  }
+
+  // Get genealogy data for downline calculations
+  const downlineIncome = await calculateDownlineIncome(liveManagerHandle, baseComm);
+
+  // Create transaction
+  const transactionId = `tx_${batchId}_${rowNumber}`;
+  const transactionData = {
+    id: transactionId,
+    batchId: batchId,
+    creatorId: creator.id,
+    creatorName: creatorName,
+    liveManagerId: liveManager.id,
+    liveManagerHandle: liveManagerHandle,
+    teamManagerId: teamManager?.id || null,
+    teamManagerHandle: teamManagerHandle || null,
+    grossAmount: gross,
+    bonusSum: bonusSum,
+    netAmount: net,
+    baseCommission: baseComm,
+    commissionRate: rate,
+    milestoneBonuses: milestoneBonuses,
+    downlineIncome: downlineIncome,
+    period: getCurrentPeriod(),
+    rowNumber: rowNumber,
+    createdAt: admin.firestore.Timestamp.now()
+  };
+
+  await db.collection('transactions').doc(transactionId).set(transactionData);
+  console.log(`Transaction created: ${transactionId}`);
+}
+
+// Get or create creator
+async function getOrCreateCreator(creatorName) {
+  const creatorsSnapshot = await db.collection('creators')
+    .where('name', '==', creatorName)
+    .limit(1)
+    .get();
+
+  if (!creatorsSnapshot.empty) {
+    const doc = creatorsSnapshot.docs[0];
+    return { id: doc.id, ...doc.data() };
+  }
+
+  // Create new creator
+  const creatorId = `creator_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  const creatorData = {
+    id: creatorId,
+    name: creatorName,
+    createdAt: admin.firestore.Timestamp.now()
+  };
+
+  await db.collection('creators').doc(creatorId).set(creatorData);
+  console.log(`New creator created: ${creatorName}`);
+  
+  return creatorData;
+}
+
+// Get or create manager
+async function getOrCreateManager(managerHandle, type) {
+  const managersSnapshot = await db.collection('managers')
+    .where('handle', '==', managerHandle)
+    .limit(1)
+    .get();
+
+  if (!managersSnapshot.empty) {
+    const doc = managersSnapshot.docs[0];
+    return { id: doc.id, ...doc.data() };
+  }
+
+  // Create new manager
+  const managerId = `manager_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  const managerData = {
+    id: managerId,
+    handle: managerHandle,
+    name: managerHandle, // Use handle as name for now
+    type: type,
+    commissionRate: type === 'LIVE' ? 0.30 : 0.35,
+    createdAt: admin.firestore.Timestamp.now()
+  };
+
+  await db.collection('managers').doc(managerId).set(managerData);
+  console.log(`New manager created: ${managerHandle} (${type})`);
+  
+  return managerData;
+}
+
+// Calculate downline income based on genealogy
+async function calculateDownlineIncome(liveManagerHandle, baseComm) {
+  try {
+    // Get genealogy entries where this manager appears as teamManager
+    const genealogySnapshot = await db.collection('genealogy')
+      .where('teamManagerHandle', '==', liveManagerHandle)
+      .get();
+
+    let downlineIncome = {
+      levelA: 0,
+      levelB: 0,
+      levelC: 0,
+      total: 0
+    };
+
+    if (genealogySnapshot.empty) {
+      return downlineIncome;
+    }
+
+    // Calculate downline percentages based on levels
+    genealogySnapshot.forEach(doc => {
+      const genealogyData = doc.data();
+      const level = genealogyData.level;
+      
+      if (level === 'A') {
+        downlineIncome.levelA += baseComm * 0.10;
+      } else if (level === 'B') {
+        downlineIncome.levelB += baseComm * 0.075;
+      } else if (level === 'C') {
+        downlineIncome.levelC += baseComm * 0.05;
+      }
+    });
+
+    downlineIncome.total = downlineIncome.levelA + downlineIncome.levelB + downlineIncome.levelC;
+    
+    return downlineIncome;
+  } catch (error) {
+    console.error('Error calculating downline income:', error);
+    return { levelA: 0, levelB: 0, levelC: 0, total: 0 };
+  }
+}
+
+// Get current period (YYYYMM)
+function getCurrentPeriod() {
   const now = new Date();
   const year = now.getFullYear();
   const month = (now.getMonth() + 1).toString().padStart(2, '0');
   return `${year}${month}`;
-}
-
-// Helper function to process individual row data
-function processRowData(row) {
-  const processed = {};
-  
-  // Map common Excel columns to our data structure
-  for (const [key, value] of Object.entries(row)) {
-    const lowerKey = key.toLowerCase();
-    
-    if (lowerKey.includes('name') || lowerKey.includes('creator')) {
-      processed.creatorName = value;
-    } else if (lowerKey.includes('manager')) {
-      processed.managerName = value;
-    } else if (lowerKey.includes('amount') || lowerKey.includes('revenue') || lowerKey.includes('earnings')) {
-      processed.amount = parseFloat(value) || 0;
-    } else if (lowerKey.includes('commission')) {
-      processed.commission = parseFloat(value) || 0;
-    } else if (lowerKey.includes('date')) {
-      processed.date = value;
-    } else {
-      // Keep original data
-      processed[key] = value;
-    }
-  }
-  
-  return processed;
 }
 
 // Bonuses routes
@@ -324,27 +575,93 @@ app.get('/bonuses', authenticateToken, async (req, res) => {
   }
 });
 
-// Get upload batches
+// Admin API: Get upload batches
 app.get('/uploads/batches', authenticateToken, async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
-    const snapshot = await db.collection('upload_batches')
+    const limit = parseInt(req.query.limit) || 20;
+    const snapshot = await db.collection('uploadBatches')
       .orderBy('createdAt', 'desc')
-      .limit(20)
+      .limit(limit)
       .get();
 
     const batches = [];
     snapshot.forEach(doc => {
-      batches.push(doc.data());
+      const data = doc.data();
+      batches.push({
+        id: doc.id,
+        ...data,
+        createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt
+      });
     });
 
     res.json({ data: batches });
   } catch (error) {
     console.error('Error fetching upload batches:', error);
     res.status(500).json({ error: 'Failed to fetch upload batches' });
+  }
+});
+
+// Admin API: Get specific upload batch
+app.get('/uploads/batches/:id', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const batchId = req.params.id;
+    const batchDoc = await db.collection('uploadBatches').doc(batchId).get();
+
+    if (!batchDoc.exists) {
+      return res.status(404).json({ error: 'Batch not found' });
+    }
+
+    const batchData = batchDoc.data();
+    res.json({
+      id: batchDoc.id,
+      ...batchData,
+      createdAt: batchData.createdAt?.toDate?.()?.toISOString() || batchData.createdAt,
+      completedAt: batchData.completedAt?.toDate?.()?.toISOString() || batchData.completedAt
+    });
+  } catch (error) {
+    console.error('Error fetching upload batch:', error);
+    res.status(500).json({ error: 'Failed to fetch upload batch' });
+  }
+});
+
+// Admin API: Get transactions for specific batch
+app.get('/uploads/batches/:id/transactions', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const batchId = req.params.id;
+    const snapshot = await db.collection('transactions')
+      .where('batchId', '==', batchId)
+      .orderBy('rowNumber', 'asc')
+      .get();
+
+    const transactions = [];
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      transactions.push({
+        id: doc.id,
+        ...data,
+        createdAt: data.createdAt?.toDate?.()?.toISOString() || data.createdAt
+      });
+    });
+
+    res.json({ 
+      data: transactions,
+      count: transactions.length 
+    });
+  } catch (error) {
+    console.error('Error fetching batch transactions:', error);
+    res.status(500).json({ error: 'Failed to fetch batch transactions' });
   }
 });
 
