@@ -482,158 +482,344 @@ app.post('/uploads/excel', authenticateToken, upload.single('file'), async (req,
   }
 });
 
-// Excel processing function
-async function processExcelBatch(batchId, fileBuffer, filename) {
-  console.log(`Starting Excel processing for batch: ${batchId}`);
+// Alternative Upload Route - Base64 to bypass multipart issues
+app.post('/uploads/excel-base64', authenticateToken, async (req, res) => {
+  console.log('📤 Base64 Upload endpoint hit');
+  console.log('User:', req.user);
   
   try {
-    // Parse Excel file
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const { fileData, fileName, mimeType } = req.body;
+    
+    if (!fileData) {
+      console.error('No file data in request');
+      return res.status(422).json({ error: 'No file data uploaded' });
+    }
+
+    if (!fileName) {
+      return res.status(422).json({ error: 'File name is required' });
+    }
+
+    console.log('📄 Processing file:', { fileName, mimeType, dataLength: fileData.length });
+
+    // Decode base64 to buffer
+    let fileBuffer;
+    try {
+      // Remove data URL prefix if present (data:application/...;base64,)
+      const base64Data = fileData.replace(/^data:[^;]+;base64,/, '');
+      fileBuffer = Buffer.from(base64Data, 'base64');
+      console.log('✅ File decoded successfully, size:', fileBuffer.length, 'bytes');
+    } catch (decodeError) {
+      console.error('❌ Failed to decode base64:', decodeError);
+      return res.status(400).json({ error: 'Invalid file data format' });
+    }
+
+    if (fileBuffer.length === 0) {
+      return res.status(422).json({ error: 'Uploaded file is empty' });
+    }
+
+    // Generate batch ID
+    const batchId = `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    console.log(`🔄 Processing upload: ${fileName} -> ${batchId}`);
+
+    // Process the Excel file
+    const result = await processExcelBatch(batchId, fileBuffer, fileName, req.user);
+    
+    // Get recent batches for response
+    const recentBatchesSnapshot = await db.collection('uploadBatches')
+      .orderBy('uploadedAt', 'desc')
+      .limit(5)
+      .get();
+    
+    const recentBatches = recentBatchesSnapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        filename: data.filename || data.originalName,
+        status: data.status,
+        uploadedAt: data.uploadedAt?.toDate?.()?.toISOString() || data.uploadedAt,
+        processedCount: data.processedCount || 0,
+        newCreators: data.newCreators || 0,
+        newManagers: data.newManagers || 0,
+        transactionCount: data.transactionCount || 0,
+        uploadedBy: data.uploadedBy
+      };
+    });
+
+    console.log('✅ Upload processing completed successfully');
+
+    res.json({
+      success: true,
+      message: 'Excel file uploaded and processed successfully',
+      batch: result,
+      recentBatches: recentBatches,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ Error in base64 upload endpoint:', error);
+    console.error('Error stack:', error.stack);
+    return res.status(500).json({ 
+      error: 'Internal server error during upload processing',
+      details: error.message 
+    });
+  }
+});
+
+// Enhanced Excel processing function
+async function processExcelBatch(batchId, fileBuffer, filename, user) {
+  console.log(`🔍 Starting Excel processing for batch: ${batchId}`);
+  
+  try {
+    // 1. Save file to Firebase Storage
+    const bucket = storage.bucket();
+    const file = bucket.file(`uploads/${batchId}.xlsx`);
+    
+    await file.save(fileBuffer, {
+      metadata: {
+        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        metadata: {
+          originalName: filename,
+          batchId: batchId,
+          uploadedBy: user.email,
+          uploadedAt: new Date().toISOString()
+        }
+      }
+    });
+
+    console.log(`💾 File saved to Storage: uploads/${batchId}.xlsx`);
+
+    // 2. Create initial batch document in Firestore
+    const batchData = {
+      id: batchId,
+      filename: filename,
+      originalName: filename,
+      status: 'PROCESSING',
+      uploadedBy: user.email,
+      uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
+      processedCount: 0,
+      newCreators: 0,
+      newManagers: 0,
+      transactionCount: 0
+    };
+
+    const batchRef = db.collection('uploadBatches').doc(batchId);
+    await batchRef.set(batchData);
+
+    console.log(`📄 Batch document created: ${batchId}`);
+
+    // 3. Parse Excel file
     const workbook = xlsx.read(fileBuffer, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
     
     // Convert to JSON, starting from row 2 (skip header)
-    const data = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
-    const rows = data.slice(1); // Skip header row
-    
-    console.log(`Found ${rows.length} data rows to process`);
-
-    let processedCount = 0;
-    let newCreators = 0;
-    let newManagers = 0;
-    let transactionCount = 0;
-
-    // Process each row
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      
-      // Skip empty rows - check for creator name in column A (index 0)
-      if (!row || row.length === 0 || !row[0] || row[0].toString().trim() === '') {
-        console.log(`Skipping empty row ${i + 2}`);
-        continue;
-      }
-
-      try {
-        await processExcelRow(row, batchId, i + 2); // +2 because we skipped header and array is 0-indexed
-        processedCount++;
-        transactionCount++;
-        console.log(`Successfully processed row ${i + 2}`);
-      } catch (rowError) {
-        console.error(`Error processing row ${i + 2}:`, rowError);
-        console.error(`Row data:`, row);
-        // Continue with next row instead of failing the entire batch
-      }
-    }
-
-    // Update batch status
-    await db.collection('uploadBatches').doc(batchId).update({
-      status: 'COMPLETED',
-      processedCount: processedCount,
-      newCreators: newCreators,
-      newManagers: newManagers,
-      transactionCount: transactionCount,
-      completedAt: admin.firestore.Timestamp.now()
+    const jsonData = xlsx.utils.sheet_to_json(worksheet, { 
+      header: 1,
+      range: 1 // Skip first row (header)
     });
 
-    console.log(`Batch ${batchId} completed: ${processedCount} rows processed`);
+    console.log(`📊 Parsed ${jsonData.length} rows from Excel file`);
+
+    // 4. Process data and calculate commissions
+    const processedData = await processCommissionData(jsonData, batchId);
+
+    // 5. Update batch status
+    await batchRef.update({
+      status: 'COMPLETED',
+      processedCount: processedData.processedCount,
+      newCreators: processedData.newCreators,
+      newManagers: processedData.newManagers,
+      transactionCount: processedData.transactionCount,
+      completedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    console.log(`✅ Batch processing completed: ${batchId}`);
+
+    return {
+      id: batchId,
+      filename: filename,
+      status: 'COMPLETED',
+      ...processedData
+    };
 
   } catch (error) {
-    console.error(`Error processing batch ${batchId}:`, error);
+    console.error(`❌ Error processing batch ${batchId}:`, error);
     
-    // Update batch status to failed
-    await db.collection('uploadBatches').doc(batchId).update({
-      status: 'FAILED',
-      error: error.message,
-      completedAt: admin.firestore.Timestamp.now()
-    });
+    // Update batch with error status
+    try {
+      await db.collection('uploadBatches').doc(batchId).update({
+        status: 'ERROR',
+        error: error.message,
+        completedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } catch (updateError) {
+      console.error('Failed to update batch with error status:', updateError);
+    }
     
     throw error;
   }
 }
 
-// Process individual Excel row
-async function processExcelRow(row, batchId, rowNumber) {
-  try {
-    // Extract data from specific columns according to spec
-    // Use more flexible column mapping to handle different Excel formats
-    const creatorName = (row[0] || '').toString().trim(); // Column A - Creator Name
-    const grossAmount = parseFloat(row[1]) || 0; // Column B - Gross Amount  
-    const netAmount = parseFloat(row[2]) || 0; // Column C - Net Amount
-    const period = (row[3] || '').toString().trim(); // Column D - Period
-    const liveManagerHandle = (row[4] || '').toString().trim(); // Column E - Live Manager Handle
-    const liveManagerName = (row[5] || '').toString().trim(); // Column F - Live Manager Name
-    const teamManagerHandle = (row[6] || '').toString().trim(); // Column G - Team Manager Handle (optional)
-    const teamManagerName = (row[7] || '').toString().trim(); // Column H - Team Manager Name (optional)
+// Commission calculation logic
+async function processCommissionData(rows, batchId) {
+  console.log(`💰 Processing commission data for ${rows.length} rows`);
+  
+  let processedCount = 0;
+  let newCreators = 0;
+  let newManagers = 0;
+  let transactionCount = 0;
 
-    console.log(`Processing row ${rowNumber}: Creator: "${creatorName}", Gross: ${grossAmount}, Net: ${netAmount}, Live: "${liveManagerHandle}", Team: "${teamManagerHandle}"`);
+  for (const row of rows) {
+    try {
+      // Expected columns: Creator Name, Gross, Net, Period, Live Mgr, Live Mgr Name, Team Mgr, Team Mgr Name
+      const [creatorName, gross, net, period, liveMgrId, liveMgrName, teamMgrId, teamMgrName] = row;
 
-    // Skip if essential data is missing
-    if (!creatorName || !liveManagerHandle || !period || grossAmount <= 0) {
-      console.log(`Skipping row ${rowNumber}: missing essential data - Creator: "${creatorName}", Live: "${liveManagerHandle}", Period: "${period}", Gross: ${grossAmount}`);
-      return;
+      if (!creatorName || gross === undefined) {
+        console.log(`⚠️ Skipping invalid row:`, row);
+        continue;
+      }
+
+      // 1. Create or update Creator
+      const creatorId = `creator_${creatorName.replace(/\s+/g, '_').toLowerCase()}`;
+      const creatorRef = db.collection('creators').doc(creatorId);
+      const creatorDoc = await creatorRef.get();
+      
+      if (!creatorDoc.exists) {
+        await creatorRef.set({
+          id: creatorId,
+          name: creatorName,
+          email: `${creatorName.replace(/\s+/g, '_').toLowerCase()}@creator.com`,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          batchId: batchId
+        });
+        newCreators++;
+        console.log(`👤 Created new creator: ${creatorName}`);
+      }
+
+      // 2. Create or update Live Manager
+      if (liveMgrId && liveMgrName) {
+        const liveMgrRef = db.collection('managers').doc(liveMgrId);
+        const liveMgrDoc = await liveMgrRef.get();
+        
+        if (!liveMgrDoc.exists) {
+          await liveMgrRef.set({
+            id: liveMgrId,
+            name: liveMgrName,
+            type: 'LIVE',
+            email: `${liveMgrId}@manager.com`,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            batchId: batchId
+          });
+          newManagers++;
+          console.log(`👥 Created new live manager: ${liveMgrName}`);
+        }
+      }
+
+      // 3. Create or update Team Manager
+      if (teamMgrId && teamMgrName) {
+        const teamMgrRef = db.collection('managers').doc(teamMgrId);
+        const teamMgrDoc = await teamMgrRef.get();
+        
+        if (!teamMgrDoc.exists) {
+          await teamMgrRef.set({
+            id: teamMgrId,
+            name: teamMgrName,
+            type: 'TEAM',
+            email: `${teamMgrId}@manager.com`,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            batchId: batchId
+          });
+          newManagers++;
+          console.log(`👥 Created new team manager: ${teamMgrName}`);
+        }
+      }
+
+      // 4. Create Transaction
+      const transactionId = `trans_${batchId}_${processedCount}`;
+      await db.collection('transactions').doc(transactionId).set({
+        id: transactionId,
+        creatorId: creatorId,
+        creatorName: creatorName,
+        gross: parseFloat(gross) || 0,
+        net: parseFloat(net) || 0,
+        period: period || new Date().toISOString().slice(0, 7), // YYYY-MM format
+        liveMgrId: liveMgrId || null,
+        liveMgrName: liveMgrName || null,
+        teamMgrId: teamMgrId || null,
+        teamMgrName: teamMgrName || null,
+        batchId: batchId,
+        date: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      // 5. Calculate and create Bonuses
+      const grossAmount = parseFloat(gross) || 0;
+      const netAmount = parseFloat(net) || 0;
+      
+      // Live Manager Bonus (5% of gross)
+      if (liveMgrId && grossAmount > 0) {
+        const liveMgrBonus = grossAmount * 0.05;
+        await db.collection('bonuses').add({
+          managerId: liveMgrId,
+          managerName: liveMgrName,
+          managerType: 'LIVE',
+          amount: liveMgrBonus,
+          basedOnGross: grossAmount,
+          creatorId: creatorId,
+          creatorName: creatorName,
+          transactionId: transactionId,
+          batchId: batchId,
+          period: period,
+          calculatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        console.log(`💰 Live manager bonus: ${liveMgrName} gets ${liveMgrBonus.toFixed(2)} (5% of ${grossAmount})`);
+      }
+
+      // Team Manager Bonus (3% of gross)
+      if (teamMgrId && grossAmount > 0) {
+        const teamMgrBonus = grossAmount * 0.03;
+        await db.collection('bonuses').add({
+          managerId: teamMgrId,
+          managerName: teamMgrName,
+          managerType: 'TEAM',
+          amount: teamMgrBonus,
+          basedOnGross: grossAmount,
+          creatorId: creatorId,
+          creatorName: creatorName,
+          transactionId: transactionId,
+          batchId: batchId,
+          period: period,
+          calculatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        console.log(`💰 Team manager bonus: ${teamMgrName} gets ${teamMgrBonus.toFixed(2)} (3% of ${grossAmount})`);
+      }
+
+      transactionCount++;
+      processedCount++;
+
+    } catch (rowError) {
+      console.error(`❌ Error processing row ${processedCount}:`, rowError);
+      console.error('Row data:', row);
     }
-
-    // Calculate basic amounts
-    const bonusSum = 0; // For now, set to 0 - can be calculated from additional columns if needed
-    const net = netAmount || (grossAmount - bonusSum);
-    const isLive = true; // Live manager (could be determined by other logic)
-    const rate = isLive ? 0.30 : 0.35;
-    const baseComm = net * rate;
-
-    // Milestone bonuses (these would be calculated based on actual business logic)
-    const milestoneBonuses = {
-      half: 0,
-      m1: 0,
-      m2: 0,
-      retention: 0
-    };
-
-    // Get or create Creator
-    const creator = await getOrCreateCreator(creatorName);
-    
-    // Get or create Live Manager
-    const liveManager = await getOrCreateManager(liveManagerHandle, liveManagerName || liveManagerHandle, 'LIVE');
-    
-    // Get or create Team Manager (if exists)
-    let teamManager = null;
-    if (teamManagerHandle) {
-      teamManager = await getOrCreateManager(teamManagerHandle, teamManagerName || teamManagerHandle, 'TEAM');
-    }
-
-    // Get genealogy data for downline calculations
-    const downlineIncome = await calculateDownlineIncome(liveManagerHandle, baseComm);
-
-    // Create transaction
-    const transactionId = `tx_${batchId}_${rowNumber}`;
-    const transactionData = {
-      id: transactionId,
-      batchId: batchId,
-      creatorId: creator.id,
-      creatorName: creatorName,
-      liveManagerId: liveManager.id,
-      liveManagerHandle: liveManagerHandle,
-      liveManagerName: liveManagerName,
-      teamManagerId: teamManager?.id || null,
-      teamManagerHandle: teamManagerHandle || null,
-      teamManagerName: teamManagerName || null,
-      grossAmount: grossAmount,
-      bonusSum: bonusSum,
-      netAmount: net,
-      baseCommission: baseComm,
-      commissionRate: rate,
-      milestoneBonuses: milestoneBonuses,
-      downlineIncome: downlineIncome,
-      period: period || getCurrentPeriod(),
-      rowNumber: rowNumber,
-      createdAt: admin.firestore.Timestamp.now()
-    };
-
-    await db.collection('transactions').doc(transactionId).set(transactionData);
-    console.log(`Transaction created: ${transactionId} for creator ${creatorName}`);
-  } catch (error) {
-    console.error(`Error processing row ${rowNumber}:`, error);
-    throw error; // Re-throw to be caught by the caller
   }
+
+  console.log(`✅ Commission processing completed:`, {
+    processedCount,
+    newCreators,
+    newManagers,
+    transactionCount
+  });
+
+  return {
+    processedCount,
+    newCreators,
+    newManagers,
+    transactionCount
+  };
 }
 
 // Get or create creator
