@@ -141,3 +141,4 @@ docs/archive/
 
 # Sonstiges
 .DS_Store
+*.zip
