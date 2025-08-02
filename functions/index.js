@@ -575,23 +575,9 @@ async function processExcelBatch(batchId, fileBuffer, filename, user) {
   console.log(`🔍 Starting Excel processing for batch: ${batchId}`);
   
   try {
-    // 1. Save file to Firebase Storage
-    const bucket = storage.bucket();
-    const file = bucket.file(`uploads/${batchId}.xlsx`);
-    
-    await file.save(fileBuffer, {
-      metadata: {
-        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        metadata: {
-          originalName: filename,
-          batchId: batchId,
-          uploadedBy: user.email,
-          uploadedAt: new Date().toISOString()
-        }
-      }
-    });
-
-    console.log(`💾 File saved to Storage: uploads/${batchId}.xlsx`);
+         // 1. File archiving (simplified - skip storage for now)
+     console.log(`💾 File processing: ${filename} (${fileBuffer.length} bytes)`);
+     // TODO: Configure Firebase Storage bucket for file archiving
 
     // 2. Create initial batch document in Firestore
     const batchData = {
