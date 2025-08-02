@@ -1476,4 +1476,4 @@ exports.api = onRequest({
   region: 'europe-west1',
   memory: '1GiB',
   timeoutSeconds: 300 
-}, app); 
+}, app); // Force update Sat Aug  2 22:30:40 CEST 2025
