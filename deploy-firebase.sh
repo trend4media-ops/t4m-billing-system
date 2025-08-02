@@ -38,7 +38,6 @@ echo -e "${BLUE}🏗️  Building Frontend...${NC}"
 cd trend4media-frontend
 npm install
 npm run build
-npm run export
 cd ..
 
 # Deploy to Firebase
