@@ -1,0 +1,11 @@
+{"users": [
+{
+  "localId": "A72xIss9p1Pf30hilc0ieSvEnzM2",
+  "email": "admin@trend4media.com",
+  "emailVerified": false,
+  "passwordHash": "9N6edls/u2WWuKKKP3xmaZd1zR463hgzAtscoP9+33YgKJz/wkkKi08oEcBvcCXFQNQ4hwrJ4kQJnrrbONTzRg==",
+  "salt": "FKu27mj4Ek7RRw==",
+  "createdAt": "1754087824905",
+  "disabled": false,
+  "providerUserInfo": []
+}]}
