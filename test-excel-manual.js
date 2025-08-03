@@ -81,7 +81,7 @@ function processExcelFile(filePath) {
 }
 
 // Test the Excel file processing
-const excelFile = ' Neu_Task_202506_UTC+0_2025_07_29_22_14_15.xlsx';
+const excelFile = './Neu_Task_202506_UTC+0_2025_07_29_22_14_15.xlsx';
 
 if (fs.existsSync(excelFile)) {
   const result = processExcelFile(excelFile);

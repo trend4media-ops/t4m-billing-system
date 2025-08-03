@@ -176,4 +176,151 @@ firebase deploy --only hosting
 3. **Deploy**: Run `./deploy-firebase.sh`
 4. **Go Live**: Share your `https://your-project.web.app` URL
 
+---
+
+## 💎 Dual-Period Upload & Diamond Bonus
+
+### Overview
+
+The system supports a two-phase upload process that enables Diamond bonus calculations based on previous month performance comparison.
+
+### How It Works
+
+```mermaid
+graph TD
+    A[Upload Previous Month as Comparison] --> B[System Saves Net Amounts]
+    B --> C[Upload Current Month]
+    C --> D[System Calculates Bonuses]
+    D --> E{Net >= 1.2 × Previous Net?}
+    E -->|Yes| F[Award Diamond Bonus 50€/60€]
+    E -->|No| G[No Diamond Bonus]
+```
+
+### API Usage
+
+#### 1. Upload Comparison Month (Previous Month Data)
+
+```bash
+POST /uploads/excel?comparison=true
+Content-Type: multipart/form-data
+
+# File: june-2025.xlsx (previous month)
+```
+
+**Response:**
+```json
+{
+  "message": "Excel file processed successfully",
+  "summary": {
+    "processedRows": 150,
+    "comparisonMode": true,
+    "savedNetAmounts": 45
+  }
+}
+```
+
+#### 2. Upload Current Month (Full Processing)
+
+```bash
+POST /uploads/excel
+Content-Type: multipart/form-data
+
+# File: july-2025.xlsx (current month)
+```
+
+**Response includes Diamond bonus calculations:**
+```json
+{
+  "managerHandle": "john-doe",
+  "month": "202507",
+  "gross": 2000.00,
+  "net": 1200.00,
+  "baseCommission": 360.00,
+  "graduationBonus": 50.00,
+  "diamondBonus": 50.00,
+  "totalEarnings": 1010.00
+}
+```
+
+### Diamond Bonus Rules
+
+| Manager Type | Bonus Amount | Trigger Condition |
+|--------------|--------------|-------------------|
+| Live Manager | €50.00       | Current net ≥ 1.2 × Previous net |
+| Team Manager | €60.00       | Current net ≥ 1.2 × Previous net |
+
+### Admin View - Comparison Uploads
+
+```bash
+GET /uploads/comparison-uploads
+```
+
+**Response:**
+```json
+[
+  {
+    "period": "202506",
+    "managerCount": 45,
+    "firstUpload": "2025-06-01T10:00:00Z",
+    "lastUpload": "2025-06-01T10:00:00Z",
+    "fileName": "comparison-202506.xlsx"
+  }
+]
+```
+
+### Frontend Integration
+
+#### Manager Dashboard
+- **Diamond Goal Badge**: Prominently displays when Diamond bonus is achieved
+- **Achievement Notification**: "🎉 Diamond Goal Achieved!"
+- **Bonus Amount**: Highlighted in earnings summary
+
+#### Admin Panel
+- **Comparison Uploads View**: Lists all uploaded comparison months
+- **Upload History**: Shows which periods have baseline data
+- **Manager Performance Tracking**: Diamond bonus achievement rates
+
+### Database Schema
+
+#### ManagerMonthlyNet Table
+```sql
+CREATE TABLE manager_monthly_net (
+  managerId VARCHAR PRIMARY KEY,
+  period VARCHAR PRIMARY KEY,        -- 'YYYYMM'
+  netCent BIGINT NOT NULL,          -- Net amount in cents
+  uploadedAt TIMESTAMP DEFAULT NOW()
+);
+```
+
+### Implementation Details
+
+1. **Comparison Mode**: When `?comparison=true` is passed, system:
+   - Processes Excel normally
+   - Calculates net amounts per manager
+   - Saves to `ManagerMonthlyNet` table
+   - **Skips** bonus calculations and commission processing
+
+2. **Regular Mode**: When processing current month:
+   - Processes Excel with full calculations
+   - Retrieves previous month net from `ManagerMonthlyNet`
+   - Calculates Diamond bonus: `net >= Math.round(previousNet * 1.2)`
+   - Awards role-specific bonus amounts
+
+3. **Fallback Logic**: If no previous month data exists:
+   - No Diamond bonus awarded
+   - System continues normal processing
+   - Logs warning for audit trail
+
+### Testing
+
+```bash
+# Test Diamond bonus logic
+npm test -- --testNamePattern="Diamond Bonus Tests"
+
+# Test upload endpoints
+npm run test:e2e -- upload-to-payout-workflow.spec.ts
+```
+
+---
+
 **Welcome to serverless development! 🔥** 

@@ -8,7 +8,7 @@ async function testBase64Upload() {
     // 1. Login to get token
     console.log('🔐 Logging in...');
     const loginResponse = await axios.post(
-      'https://api-piwtsoxesq-ew.a.run.app/auth/login',
+      'https://europe-west1-trend4media-billing.cloudfunctions.net/api/auth/login',
       {
         email: 'admin@trend4media.com',
         password: 'admin123'
@@ -19,7 +19,7 @@ async function testBase64Upload() {
     console.log('✅ Login successful, got token');
     
     // 2. Read Excel file and convert to base64
-    const filePath = ' Neu_Task_202506_UTC+0_2025_07_29_22_14_15.xlsx';
+    const filePath = './Neu_Task_202506_UTC+0_2025_07_29_22_14_15.xlsx';
     
     if (!fs.existsSync(filePath)) {
       console.error('❌ Excel file not found:', filePath);
@@ -38,7 +38,7 @@ async function testBase64Upload() {
     // 3. Upload via base64 endpoint
     console.log('📤 Uploading via base64 endpoint...');
     const uploadResponse = await axios.post(
-      'https://api-piwtsoxesq-ew.a.run.app/uploads/excel-base64',
+      'https://europe-west1-trend4media-billing.cloudfunctions.net/api/uploads/excel-base64',
       {
         fileData: base64Data,
         fileName: 'Neu_Task_202506_UTC+0_2025_07_29_22_14_15.xlsx',

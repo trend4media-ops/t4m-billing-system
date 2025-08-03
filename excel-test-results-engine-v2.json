@@ -1,0 +1,129 @@
+{
+  "timestamp": "2025-08-03T00:19:55.917Z",
+  "file": " Neu_Task_202506_UTC+0_2025_07_29_22_14_15.xlsx",
+  "totalRows": 212,
+  "totalGross": 15609.541799999999,
+  "milestoneCounts": {
+    "S": 4,
+    "N": 2,
+    "O": 0,
+    "P": 1
+  },
+  "managerStats": {
+    "VenTriiX": {
+      "type": "LIVE",
+      "gross": 55.7436,
+      "count": 10
+    },
+    "Gosia Ocepek": {
+      "type": "LIVE",
+      "gross": 387.70930000000004,
+      "count": 26
+    },
+    "Manni Ocepek": {
+      "type": "TEAM",
+      "gross": 8160.9967000000015,
+      "count": 57
+    },
+    "Ghul": {
+      "type": "LIVE",
+      "gross": 12.8238,
+      "count": 8
+    },
+    "Matschersgamingworld": {
+      "type": "LIVE",
+      "gross": 2079.6560000000004,
+      "count": 32
+    },
+    "Tim Ostholt": {
+      "type": "LIVE",
+      "gross": 602.1902,
+      "count": 27
+    },
+    "♤Kaida♤": {
+      "type": "LIVE",
+      "gross": 1531.3752000000004,
+      "count": 56
+    },
+    "Florian Tripodi": {
+      "type": "LIVE",
+      "gross": 1004.4421999999997,
+      "count": 80
+    },
+    "TheMrDoesi": {
+      "type": "LIVE",
+      "gross": 1.1484,
+      "count": 2
+    },
+    "ColorfulCollection": {
+      "type": "LIVE",
+      "gross": 4904.219800000001,
+      "count": 48
+    },
+    "Marina Ostholt": {
+      "type": "LIVE",
+      "gross": 234.6696,
+      "count": 24
+    },
+    "Baastti": {
+      "type": "LIVE",
+      "gross": 131.56,
+      "count": 6
+    },
+    "Tu Es Fixi": {
+      "type": "LIVE",
+      "gross": 7578.7898000000005,
+      "count": 5
+    },
+    "André Stark": {
+      "type": "LIVE",
+      "gross": 3100.7960000000003,
+      "count": 8
+    },
+    "DkStudio": {
+      "type": "LIVE",
+      "gross": 24.763199999999998,
+      "count": 6
+    },
+    "Christian": {
+      "type": "LIVE",
+      "gross": 806.0096000000001,
+      "count": 2
+    }
+  },
+  "engine": "v2",
+  "constants": {
+    "MILESTONE_DEDUCTIONS": {
+      "S": 15000,
+      "N": 30000,
+      "O": 100000,
+      "P": 24000
+    },
+    "MILESTONE_PAYOUTS": {
+      "live": {
+        "S": 7500,
+        "N": 15000,
+        "O": 40000,
+        "P": 10000
+      },
+      "team": {
+        "S": 8000,
+        "N": 16500,
+        "O": 45000,
+        "P": 12000
+      }
+    },
+    "GRADUATION_BONUS": {
+      "live": 5000,
+      "team": 6000
+    },
+    "DIAMOND_BONUS": {
+      "live": 5000,
+      "team": 6000
+    },
+    "BASE_RATES": {
+      "live": 0.3,
+      "team": 0.35
+    }
+  }
+}

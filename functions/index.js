@@ -227,13 +227,50 @@ app.get('/managers/earnings', authenticateToken, async (req, res) => {
 
       const transactions = transactionsSnapshot.docs.map(doc => doc.data());
       
-      // Calculate earnings
-      const grossAmount = transactions.reduce((sum, tx) => sum + (tx.grossAmount || 0), 0);
-      const netAmount = transactions.reduce((sum, tx) => sum + (tx.netAmount || 0), 0);
-      const baseCommission = transactions.reduce((sum, tx) => sum + (tx.baseCommission || 0), 0);
-      const downlineIncome = transactions.reduce((sum, tx) => sum + (tx.downlineIncome?.total || 0), 0);
+      // Get bonuses for this manager and month
+      const bonusesSnapshot = await db.collection('bonuses')
+        .where('managerId', '==', manager.id)
+        .where('period', '==', month)
+        .get();
+
+      const bonuses = bonusesSnapshot.docs.map(doc => doc.data());
       
-      if (grossAmount > 0) { // Only include managers with earnings
+      // Calculate DEFINITIVE earnings according to new specification
+      const grossAmount = transactions.reduce((sum, tx) => sum + (tx.grossAmount || 0), 0);
+      const deductions = transactions.reduce((sum, tx) => sum + (tx.deductions || 0), 0);
+      const netForCommission = transactions.reduce((sum, tx) => sum + (tx.netForCommission || 0), 0);
+      
+      const baseCommission = bonuses
+        .filter(b => b.type === 'BASE_COMMISSION')
+        .reduce((sum, b) => sum + (b.amount || 0), 0);
+      
+      const downlineIncome = transactions.reduce((acc, tx) => {
+        const dl = tx.downlineIncome || {};
+        return {
+          levelA: acc.levelA + (dl.levelA || 0),
+          levelB: acc.levelB + (dl.levelB || 0),
+          levelC: acc.levelC + (dl.levelC || 0),
+          total: acc.total + (dl.total || 0)
+        };
+      }, { levelA: 0, levelB: 0, levelC: 0, total: 0 });
+
+      // DEFINITIVE milestone bonuses with fixed values
+      const milestoneBonuses = {
+        N: bonuses.filter(b => b.type === 'MILESTONE_1_BONUS').reduce((sum, b) => sum + (b.amount || 0), 0),
+        O: bonuses.filter(b => b.type === 'MILESTONE_2_BONUS').reduce((sum, b) => sum + (b.amount || 0), 0),
+        P: bonuses.filter(b => b.type === 'MILESTONE_3_BONUS').reduce((sum, b) => sum + (b.amount || 0), 0),
+        S: bonuses.filter(b => b.type === 'GRADUATION_BONUS').reduce((sum, b) => sum + (b.amount || 0), 0)
+      };
+
+      const recruitmentBonuses = bonuses
+        .filter(b => b.type === 'RECRUITMENT_BONUS')
+        .reduce((sum, b) => sum + (b.amount || 0), 0);
+
+      const diamondBonus = bonuses
+        .filter(b => b.type === 'DIAMOND_BONUS')
+        .reduce((sum, b) => sum + (b.amount || 0), 0);
+      
+      if (grossAmount > 0 || baseCommission > 0) { // Only include managers with earnings
         earningsData.push({
           managerId: manager.id,
           managerHandle: manager.handle,
@@ -241,10 +278,14 @@ app.get('/managers/earnings', authenticateToken, async (req, res) => {
           managerType: manager.type,
           month: month,
           grossAmount,
-          netAmount,
+          deductions,
+          netForCommission,
           baseCommission,
-          downlineIncome,
-          totalEarnings: baseCommission + downlineIncome,
+          downlineBonus: downlineIncome.total,
+          milestoneBonuses,
+          recruitmentBonus: recruitmentBonuses,
+          diamondBonus,
+          totalPayout: baseCommission + downlineIncome.total + milestoneBonuses.N + milestoneBonuses.O + milestoneBonuses.P + milestoneBonuses.S + recruitmentBonuses + diamondBonus,
           transactionCount: transactions.length
         });
       }
@@ -290,13 +331,28 @@ app.get('/managers/:id/earnings', authenticateToken, async (req, res) => {
       ...doc.data()
     }));
 
-    // Calculate detailed earnings
+    // Get bonuses for this manager and month  
+    const bonusesSnapshot = await db.collection('bonuses')
+      .where('managerId', '==', managerId)
+      .where('period', '==', month)
+      .get();
+
+    const bonuses = bonusesSnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+
+    // Calculate detailed DEFINITIVE earnings according to new specification
     const grossAmount = transactions.reduce((sum, tx) => sum + (tx.grossAmount || 0), 0);
-    const netAmount = transactions.reduce((sum, tx) => sum + (tx.netAmount || 0), 0);
-    const bonusSum = transactions.reduce((sum, tx) => sum + (tx.bonusSum || 0), 0);
-    const baseCommission = transactions.reduce((sum, tx) => sum + (tx.baseCommission || 0), 0);
+    const deductions = transactions.reduce((sum, tx) => sum + (tx.deductions || 0), 0);
+    const netForCommission = transactions.reduce((sum, tx) => sum + (tx.netForCommission || 0), 0);
     
-    // Downline income breakdown
+    // Base commission (30% for Live, 35% for Team from netForCommission)
+    const baseCommission = bonuses
+      .filter(b => b.type === 'BASE_COMMISSION')
+      .reduce((sum, b) => sum + (b.amount || 0), 0);
+    
+    // Downline income breakdown (Level A: 10%, Level B: 7.5%, Level C: 5%)
     const downlineIncome = transactions.reduce((acc, tx) => {
       const dl = tx.downlineIncome || {};
       return {
@@ -307,16 +363,23 @@ app.get('/managers/:id/earnings', authenticateToken, async (req, res) => {
       };
     }, { levelA: 0, levelB: 0, levelC: 0, total: 0 });
 
-    // Milestone bonuses
-    const milestoneBonuses = transactions.reduce((acc, tx) => {
-      const mb = tx.milestoneBonuses || {};
-      return {
-        half: acc.half + (mb.half || 0),
-        m1: acc.m1 + (mb.m1 || 0),
-        m2: acc.m2 + (mb.m2 || 0),
-        retention: acc.retention + (mb.retention || 0)
-      };
-    }, { half: 0, m1: 0, m2: 0, retention: 0 });
+    // DEFINITIVE milestone bonuses (Fixed values: N=300, O=1000, P=240, S=150)
+    const milestoneBonuses = {
+      N: bonuses.filter(b => b.type === 'MILESTONE_1_BONUS').reduce((sum, b) => sum + (b.amount || 0), 0),
+      O: bonuses.filter(b => b.type === 'MILESTONE_2_BONUS').reduce((sum, b) => sum + (b.amount || 0), 0),
+      P: bonuses.filter(b => b.type === 'MILESTONE_3_BONUS').reduce((sum, b) => sum + (b.amount || 0), 0),
+      S: bonuses.filter(b => b.type === 'GRADUATION_BONUS').reduce((sum, b) => sum + (b.amount || 0), 0)
+    };
+
+    // Recruitment bonuses (manual via /recruitment-bonus)
+    const recruitmentBonuses = bonuses
+      .filter(b => b.type === 'RECRUITMENT_BONUS')
+      .reduce((sum, b) => sum + (b.amount || 0), 0);
+
+    // Diamond Target Bonus (netForCommission ≥ 1.2 × previous month)
+    const diamondBonus = bonuses
+      .filter(b => b.type === 'DIAMOND_BONUS')
+      .reduce((sum, b) => sum + (b.amount || 0), 0);
 
     const earningsData = {
       managerId: manager.id,
@@ -324,15 +387,23 @@ app.get('/managers/:id/earnings', authenticateToken, async (req, res) => {
       managerName: manager.name,
       managerType: manager.type,
       month: month,
+      
+      // DEFINITIVE commission data structure
       grossAmount,
-      netAmount,
-      bonusSum,
+      deductions,
+      netForCommission,
       baseCommission,
-      downlineIncome,
       milestoneBonuses,
-      totalEarnings: baseCommission + downlineIncome.total,
+      diamondBonus,
+      downlineBonus: downlineIncome.total,
+      recruitmentBonus: recruitmentBonuses,
+      totalPayout: baseCommission + downlineIncome.total + milestoneBonuses.N + milestoneBonuses.O + milestoneBonuses.P + milestoneBonuses.S + recruitmentBonuses + diamondBonus,
+      
+      // Additional details
       transactionCount: transactions.length,
-      transactions: transactions
+      bonusCount: bonuses.length,
+      transactions: transactions,
+      bonuses: bonuses
     };
 
     res.json(earningsData);
@@ -651,9 +722,10 @@ async function processExcelBatch(batchId, fileBuffer, filename, user) {
   }
 }
 
-// Commission calculation logic
+// 🔢 DEFINITIVE COMMISSION CALCULATION LOGIC 
+// Implementation according to COMMISSION_LOGIC_DEFINITIVE.md
 async function processCommissionData(rows, batchId) {
-  console.log(`💰 Processing commission data for ${rows.length} rows`);
+  console.log(`💰 Processing commission data for ${rows.length} rows with DEFINITIVE logic`);
   
   let processedCount = 0;
   let newCreators = 0;
@@ -662,127 +734,397 @@ async function processCommissionData(rows, batchId) {
 
   for (const row of rows) {
     try {
-      // Expected columns: Creator Name, Gross, Net, Period, Live Mgr, Live Mgr Name, Team Mgr, Team Mgr Name
-      const [creatorName, gross, net, period, liveMgrId, liveMgrName, teamMgrId, teamMgrName] = row;
+      // Excel column mapping based on provided structure:
+      // Index:  0=Data Month, 1=Creator ID, 2=Creator nickname, 3=Handle, 4=Creator Network manager, 
+      //         5=Group, 6=Group manager, 7=Is violative creators, 8=The creator was Rookie, 9=Diamonds,
+      //         10=Valid days(d), 11=LIVE duration(h), 12=Estimated bonus (GROSS - Column M),
+      //         13=Milestone1, 14=Milestone2, 15=Milestone3, 16=Activeness, 17=Incremental revenue, 18=Graduation
+      
+      if (!row || row.length < 19) {
+        console.log(`⚠️ Skipping incomplete row:`, row);
+        continue;
+      }
 
-      if (!creatorName || gross === undefined) {
-        console.log(`⚠️ Skipping invalid row:`, row);
+      const period = row[0]; // Data Month
+      const creatorId = row[1]; // Creator ID  
+      const creatorName = row[2]; // Creator nickname
+      const handle = row[3]; // Handle
+      const liveManagerName = row[4]; // Creator Network manager
+      const groupName = row[5]; // Group
+      const teamManagerName = row[6]; // Group manager
+      
+      // DEFINITIVE COMMISSION LOGIC START
+      // 1. GROSS = Column M (Index 12)
+      const grossAmount = parseFloat(row[12]) || 0;
+      
+      // 2. DEDUCTIONS: Only if milestone columns have SPECIFIC VALUES (300, 1000, 240, 150)
+      const deductions = [];
+      if (row[13] === '300' || row[13] === 300) {
+        deductions.push(300);  // N: Only when value is exactly 300
+      }
+      if (row[14] === '1000' || row[14] === 1000) {
+        deductions.push(1000); // O: Only when value is exactly 1000
+      }
+      if (row[15] === '240' || row[15] === 240) {
+        deductions.push(240);  // P: Only when value is exactly 240
+      }
+      if (row[18] === '150' || row[18] === 150) {
+        deductions.push(150);  // S: Only when value is exactly 150
+      }
+      
+      const totalDeductions = deductions.reduce((sum, val) => sum + val, 0);
+      const netForCommission = grossAmount - totalDeductions;
+      
+      // 3. NEW MILESTONE BONUSES (Fixed amounts based on manager type)
+      // Live Manager Rookie bonuses: S:75€, N:150€, O:400€, P:100€  
+      // Team Manager Rookie bonuses: S:80€, N:165€, O:450€, P:120€
+      // CORRECTED: Only specific values count as milestone achieved
+      const hasS = row[18] === '150' || row[18] === 150;
+      const hasN = row[13] === '300' || row[13] === 300;
+      const hasO = row[14] === '1000' || row[14] === 1000;
+      const hasP = row[15] === '240' || row[15] === 240;
+      
+      const liveMilestoneBonuses = {
+        S: hasS ? 75 : 0,    // Half-Milestone/Graduation
+        N: hasN ? 150 : 0,   // Milestone 1
+        O: hasO ? 400 : 0,   // Milestone 2  
+        P: hasP ? 100 : 0    // Retention
+      };
+      
+      const teamMilestoneBonuses = {
+        S: hasS ? 80 : 0,    // Half-Milestone/Graduation
+        N: hasN ? 165 : 0,   // Milestone 1
+        O: hasO ? 450 : 0,   // Milestone 2
+        P: hasP ? 120 : 0    // Retention  
+      };
+
+      if (!creatorName || grossAmount <= 0) {
+        console.log(`⚠️ Skipping invalid row: ${creatorName}, gross: ${grossAmount}`);
         continue;
       }
 
       // 1. Create or update Creator
-      const creatorId = `creator_${creatorName.replace(/\s+/g, '_').toLowerCase()}`;
-      const creatorRef = db.collection('creators').doc(creatorId);
+      const creatorDocId = `creator_${handle.replace(/\s+/g, '_').toLowerCase()}`;
+      const creatorRef = db.collection('creators').doc(creatorDocId);
       const creatorDoc = await creatorRef.get();
       
       if (!creatorDoc.exists) {
         await creatorRef.set({
-          id: creatorId,
+          id: creatorDocId,
+          creatorId: creatorId,
           name: creatorName,
-          email: `${creatorName.replace(/\s+/g, '_').toLowerCase()}@creator.com`,
+          handle: handle,
+          email: `${handle.replace(/\s+/g, '_').toLowerCase()}@creator.com`,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           batchId: batchId
         });
         newCreators++;
-        console.log(`👤 Created new creator: ${creatorName}`);
+        console.log(`👤 Created new creator: ${creatorName} (${handle})`);
       }
 
       // 2. Create or update Live Manager
-      if (liveMgrId && liveMgrName) {
-        const liveMgrRef = db.collection('managers').doc(liveMgrId);
+      let liveManagerId = null;
+      if (liveManagerName && liveManagerName.trim() !== '') {
+        liveManagerId = `manager_${liveManagerName.replace(/\s+/g, '_').toLowerCase()}`;
+        const liveMgrRef = db.collection('managers').doc(liveManagerId);
         const liveMgrDoc = await liveMgrRef.get();
         
         if (!liveMgrDoc.exists) {
           await liveMgrRef.set({
-            id: liveMgrId,
-            name: liveMgrName,
+            id: liveManagerId,
+            handle: liveManagerName, // Use the original name as handle
+            name: liveManagerName,
             type: 'LIVE',
-            email: `${liveMgrId}@manager.com`,
+            commissionRate: 0.30, // 30% for Live Managers
+            email: `${liveManagerName.replace(/\s+/g, '_').toLowerCase()}@manager.com`,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             batchId: batchId
           });
           newManagers++;
-          console.log(`👥 Created new live manager: ${liveMgrName}`);
+          console.log(`👥 Created new live manager: ${liveManagerName}`);
+        } else {
+          // Update existing manager to ensure handle field exists
+          await liveMgrRef.update({
+            handle: liveManagerName
+          });
         }
       }
 
       // 3. Create or update Team Manager
-      if (teamMgrId && teamMgrName) {
-        const teamMgrRef = db.collection('managers').doc(teamMgrId);
+      let teamManagerId = null;
+      if (teamManagerName && teamManagerName.trim() !== '') {
+        teamManagerId = `manager_${teamManagerName.replace(/\s+/g, '_').toLowerCase()}`;
+        const teamMgrRef = db.collection('managers').doc(teamManagerId);
         const teamMgrDoc = await teamMgrRef.get();
         
         if (!teamMgrDoc.exists) {
           await teamMgrRef.set({
-            id: teamMgrId,
-            name: teamMgrName,
+            id: teamManagerId,
+            handle: teamManagerName, // Use the original name as handle
+            name: teamManagerName,
             type: 'TEAM',
-            email: `${teamMgrId}@manager.com`,
+            commissionRate: 0.35, // 35% for Team Managers
+            email: `${teamManagerName.replace(/\s+/g, '_').toLowerCase()}@manager.com`,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             batchId: batchId
           });
           newManagers++;
-          console.log(`👥 Created new team manager: ${teamMgrName}`);
+          console.log(`👥 Created new team manager: ${teamManagerName}`);
+        } else {
+          // Update existing manager to ensure handle field exists
+          await teamMgrRef.update({
+            handle: teamManagerName
+          });
         }
       }
 
-      // 4. Create Transaction
+      // 4. Create Transaction with detailed commission data
       const transactionId = `trans_${batchId}_${processedCount}`;
+      
+      // 4. BASE COMMISSION CALCULATION: 30% LIVE, 35% TEAM on netForCommission
+      const liveManagerBaseCommission = liveManagerId && netForCommission > 0 ? netForCommission * 0.30 : 0;
+      const teamManagerBaseCommission = teamManagerId && netForCommission > 0 ? netForCommission * 0.35 : 0;
+      
+      // 5. Calculate downline income based on netForCommission 
+      const liveManagerDownlineIncome = liveManagerId ? await calculateDownlineIncome(liveManagerName, netForCommission) : { levelA: 0, levelB: 0, levelC: 0, total: 0 };
+
+      // 6. Create transaction with DEFINITIVE data structure
       await db.collection('transactions').doc(transactionId).set({
         id: transactionId,
-        creatorId: creatorId,
+        creatorId: creatorDocId,
         creatorName: creatorName,
-        gross: parseFloat(gross) || 0,
-        net: parseFloat(net) || 0,
-        period: period || new Date().toISOString().slice(0, 7), // YYYY-MM format
-        liveMgrId: liveMgrId || null,
-        liveMgrName: liveMgrName || null,
-        teamMgrId: teamMgrId || null,
-        teamMgrName: teamMgrName || null,
+        creatorHandle: handle,
+        period: period,
+        
+        // NEW COMMISSION DATA STRUCTURE
+        grossAmount: grossAmount,
+        bonusSum: totalDeductions,  // renamed from deductions
+        net: netForCommission,      // renamed from netForCommission  
+        liveMilestoneBonuses: liveMilestoneBonuses,
+        teamMilestoneBonuses: teamMilestoneBonuses,
+        
+        // Manager assignments
+        liveManagerId: liveManagerId,
+        liveManagerName: liveManagerName,
+        teamManagerId: teamManagerId,
+        teamManagerName: teamManagerName,
+        
+        // Calculated commissions
+        baseCommission: liveManagerBaseCommission,
+        downlineIncome: liveManagerDownlineIncome,
+        
+        // Metadata
         batchId: batchId,
-        date: admin.firestore.FieldValue.serverTimestamp()
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        calculationVersion: 'DEFINITIVE_v1.0'
       });
 
-      // 5. Calculate and create Bonuses
-      const grossAmount = parseFloat(gross) || 0;
-      const netAmount = parseFloat(net) || 0;
-      
-      // Live Manager Bonus (5% of gross)
-      if (liveMgrId && grossAmount > 0) {
-        const liveMgrBonus = grossAmount * 0.05;
+      // 7. Create DEFINITIVE bonus entries for each manager
+      if (liveManagerId && liveManagerBaseCommission > 0) {
         await db.collection('bonuses').add({
-          managerId: liveMgrId,
-          managerName: liveMgrName,
+          managerId: liveManagerId,
+          managerHandle: liveManagerName,
+          managerName: liveManagerName,
           managerType: 'LIVE',
-          amount: liveMgrBonus,
-          basedOnGross: grossAmount,
-          creatorId: creatorId,
+          amount: liveManagerBaseCommission,
+          type: 'BASE_COMMISSION',
+          basedOnNet: netForCommission,
+          commissionRate: 0.30,
+          creatorId: creatorDocId,
           creatorName: creatorName,
           transactionId: transactionId,
           batchId: batchId,
           period: period,
+          month: period,
           calculatedAt: admin.firestore.FieldValue.serverTimestamp()
         });
-        console.log(`💰 Live manager bonus: ${liveMgrName} gets ${liveMgrBonus.toFixed(2)} (5% of ${grossAmount})`);
+        console.log(`💰 Live manager BASE commission: ${liveManagerName} gets €${liveManagerBaseCommission.toFixed(2)} (30% of €${netForCommission.toFixed(2)})`);
       }
 
-      // Team Manager Bonus (3% of gross)
-      if (teamMgrId && grossAmount > 0) {
-        const teamMgrBonus = grossAmount * 0.03;
+      if (teamManagerId && teamManagerBaseCommission > 0) {
         await db.collection('bonuses').add({
-          managerId: teamMgrId,
-          managerName: teamMgrName,
+          managerId: teamManagerId,
+          managerHandle: teamManagerName,
+          managerName: teamManagerName,
           managerType: 'TEAM',
-          amount: teamMgrBonus,
-          basedOnGross: grossAmount,
-          creatorId: creatorId,
+          amount: teamManagerBaseCommission,
+          type: 'BASE_COMMISSION',
+          basedOnNet: netForCommission,
+          commissionRate: 0.35,
+          creatorId: creatorDocId,
           creatorName: creatorName,
           transactionId: transactionId,
           batchId: batchId,
           period: period,
+          month: period,
           calculatedAt: admin.firestore.FieldValue.serverTimestamp()
         });
-        console.log(`💰 Team manager bonus: ${teamMgrName} gets ${teamMgrBonus.toFixed(2)} (3% of ${grossAmount})`);
+        console.log(`💰 Team manager BASE commission: ${teamManagerName} gets €${teamManagerBaseCommission.toFixed(2)} (35% of €${netForCommission.toFixed(2)})`);
       }
+
+      // 8. Create NEW milestone bonus entries with fixed amounts based on manager type
+      
+      // Live Manager Milestone Bonuses
+      if (liveManagerId) {
+        if (liveMilestoneBonuses.S > 0) {
+          await db.collection('bonuses').add({
+            managerId: liveManagerId,
+            managerHandle: liveManagerName,
+            managerName: liveManagerName,
+            managerType: 'LIVE',
+            amount: liveMilestoneBonuses.S,
+            type: 'MILESTONE_HALF',
+            creatorId: creatorDocId,
+            creatorName: creatorName,
+            transactionId: transactionId,
+            batchId: batchId,
+            period: period,
+            month: period,
+            calculatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          console.log(`🎓 Live Manager Half-Milestone (S): ${liveManagerName} gets €${liveMilestoneBonuses.S}`);
+        }
+        
+        if (liveMilestoneBonuses.N > 0) {
+          await db.collection('bonuses').add({
+            managerId: liveManagerId,
+            managerHandle: liveManagerName,
+            managerName: liveManagerName,
+            managerType: 'LIVE',
+            amount: liveMilestoneBonuses.N,
+            type: 'MILESTONE_1',
+            creatorId: creatorDocId,
+            creatorName: creatorName,
+            transactionId: transactionId,
+            batchId: batchId,
+            period: period,
+            month: period,
+            calculatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          console.log(`🎯 Live Manager Milestone 1 (N): ${liveManagerName} gets €${liveMilestoneBonuses.N}`);
+        }
+        
+        if (liveMilestoneBonuses.O > 0) {
+          await db.collection('bonuses').add({
+            managerId: liveManagerId,
+            managerHandle: liveManagerName,
+            managerName: liveManagerName,
+            managerType: 'LIVE',
+            amount: liveMilestoneBonuses.O,
+            type: 'MILESTONE_2',
+            creatorId: creatorDocId,
+            creatorName: creatorName,
+            transactionId: transactionId,
+            batchId: batchId,
+            period: period,
+            month: period,
+            calculatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          console.log(`🎯 Live Manager Milestone 2 (O): ${liveManagerName} gets €${liveMilestoneBonuses.O}`);
+        }
+        
+        if (liveMilestoneBonuses.P > 0) {
+          await db.collection('bonuses').add({
+            managerId: liveManagerId,
+            managerHandle: liveManagerName,
+            managerName: liveManagerName,
+            managerType: 'LIVE',
+            amount: liveMilestoneBonuses.P,
+            type: 'RETENTION',
+            creatorId: creatorDocId,
+            creatorName: creatorName,
+            transactionId: transactionId,
+            batchId: batchId,
+            period: period,
+            month: period,
+            calculatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          console.log(`🎯 Live Manager Retention (P): ${liveManagerName} gets €${liveMilestoneBonuses.P}`);
+        }
+      }
+      
+      // Team Manager Milestone Bonuses  
+      if (teamManagerId) {
+        if (teamMilestoneBonuses.S > 0) {
+          await db.collection('bonuses').add({
+            managerId: teamManagerId,
+            managerHandle: teamManagerName,
+            managerName: teamManagerName,
+            managerType: 'TEAM',
+            amount: teamMilestoneBonuses.S,
+            type: 'MILESTONE_HALF',
+            creatorId: creatorDocId,
+            creatorName: creatorName,
+            transactionId: transactionId,
+            batchId: batchId,
+            period: period,
+            month: period,
+            calculatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          console.log(`🎓 Team Manager Half-Milestone (S): ${teamManagerName} gets €${teamMilestoneBonuses.S}`);
+        }
+        
+        if (teamMilestoneBonuses.N > 0) {
+          await db.collection('bonuses').add({
+            managerId: teamManagerId,
+            managerHandle: teamManagerName,
+            managerName: teamManagerName,
+            managerType: 'TEAM',
+            amount: teamMilestoneBonuses.N,
+            type: 'MILESTONE_1',
+            creatorId: creatorDocId,
+            creatorName: creatorName,
+            transactionId: transactionId,
+            batchId: batchId,
+            period: period,
+            month: period,
+            calculatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          console.log(`🎯 Team Manager Milestone 1 (N): ${teamManagerName} gets €${teamMilestoneBonuses.N}`);
+        }
+        
+        if (teamMilestoneBonuses.O > 0) {
+          await db.collection('bonuses').add({
+            managerId: teamManagerId,
+            managerHandle: teamManagerName,
+            managerName: teamManagerName,
+            managerType: 'TEAM',
+            amount: teamMilestoneBonuses.O,
+            type: 'MILESTONE_2',
+            creatorId: creatorDocId,
+            creatorName: creatorName,
+            transactionId: transactionId,
+            batchId: batchId,
+            period: period,
+            month: period,
+            calculatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          console.log(`🎯 Team Manager Milestone 2 (O): ${teamManagerName} gets €${teamMilestoneBonuses.O}`);
+        }
+        
+        if (teamMilestoneBonuses.P > 0) {
+          await db.collection('bonuses').add({
+            managerId: teamManagerId,
+            managerHandle: teamManagerName,
+            managerName: teamManagerName,
+            managerType: 'TEAM',
+            amount: teamMilestoneBonuses.P,
+            type: 'RETENTION',
+            creatorId: creatorDocId,
+            creatorName: creatorName,
+            transactionId: transactionId,
+            batchId: batchId,
+            period: period,
+            month: period,
+            calculatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          console.log(`🎯 Team Manager Retention (P): ${teamManagerName} gets €${teamMilestoneBonuses.P}`);
+        }
+      }
+      
+      // 9. Diamond Target Bonus Check (if net ≥ 1.2 × previousNet)
+      // TODO: Implement Diamond Bonus logic - requires previous month's net comparison
+      // For now, placeholder - needs previous month data retrieval
 
       transactionCount++;
       processedCount++;
@@ -927,7 +1269,7 @@ app.get('/bonuses', authenticateToken, async (req, res) => {
       query = query.where('managerId', '==', req.user.userId);
     }
 
-    const snapshot = await query.orderBy('month', 'desc').get();
+    const snapshot = await query.orderBy('calculatedAt', 'desc').get();
     const bonuses = snapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data()
@@ -937,6 +1279,63 @@ app.get('/bonuses', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Get bonuses error:', error);
     res.status(500).json({ error: 'Failed to fetch bonuses' });
+  }
+});
+
+// Create recruitment bonus (Admin only)
+app.post('/recruitment-bonus', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { managerHandle, amount, description } = req.body;
+
+    if (!managerHandle || !amount || amount <= 0) {
+      return res.status(400).json({ error: 'managerHandle and positive amount are required' });
+    }
+
+    // Verify manager exists
+    const managerSnapshot = await db.collection('managers').where('handle', '==', managerHandle).get();
+    if (managerSnapshot.empty) {
+      return res.status(404).json({ error: `Manager with handle '${managerHandle}' not found` });
+    }
+
+    const manager = { id: managerSnapshot.docs[0].id, ...managerSnapshot.docs[0].data() };
+
+    // Create recruitment bonus
+    const bonusData = {
+      managerId: manager.id,
+      managerHandle: managerHandle,
+      managerName: manager.name,
+      managerType: manager.type,
+      amount: parseFloat(amount),
+      type: 'RECRUITMENT_BONUS',
+      description: description || 'Manual recruitment bonus',
+      period: new Date().toISOString().slice(0, 7).replace('-', ''), // YYYYMM format
+      calculatedAt: admin.firestore.Timestamp.now(),
+      createdBy: req.user.userId
+    };
+
+    const docRef = await db.collection('bonuses').add(bonusData);
+
+    // Log audit trail
+    await db.collection('audit-logs').add({
+      userId: req.user.userId,
+      action: 'RECRUITMENT_BONUS_CREATED',
+      details: {
+        bonusId: docRef.id,
+        managerHandle,
+        amount: bonusData.amount,
+        description: bonusData.description
+      },
+      timestamp: admin.firestore.Timestamp.now()
+    });
+
+    res.status(201).json({ 
+      id: docRef.id, 
+      ...bonusData,
+      calculatedAt: bonusData.calculatedAt.toDate().toISOString()
+    });
+  } catch (error) {
+    console.error('Create recruitment bonus error:', error);
+    res.status(500).json({ error: 'Failed to create recruitment bonus' });
   }
 });
 
@@ -1302,7 +1701,16 @@ app.get('/payouts', authenticateToken, async (req, res) => {
       query = query.where('managerHandle', '==', req.user.userId);
     }
 
-    const snapshot = await query.orderBy('requestedAt', 'desc').get();
+    // Use a simpler ordering that doesn't require complex indexes
+    let snapshot;
+    try {
+      snapshot = await query.orderBy('requestedAt', 'desc').get();
+    } catch (orderError) {
+      // If ordering fails due to missing index, get without ordering
+      console.log('Order by requestedAt failed, getting without order:', orderError.message);
+      snapshot = await query.get();
+    }
+    
     const payouts = [];
     
     snapshot.forEach(doc => {
@@ -1314,6 +1722,13 @@ app.get('/payouts', authenticateToken, async (req, res) => {
         processedAt: data.processedAt?.toDate?.()?.toISOString() || data.processedAt
       });
     });
+
+    // Sort in memory if we couldn't sort in query
+    if (payouts.length > 0 && !payouts[0].requestedAt) {
+      // If no requestedAt, don't sort
+    } else {
+      payouts.sort((a, b) => new Date(b.requestedAt || 0) - new Date(a.requestedAt || 0));
+    }
 
     res.json({ data: payouts });
   } catch (error) {
