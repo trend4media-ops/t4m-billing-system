@@ -34,56 +34,45 @@ export async function getManagerEarnings(
     }
     const manager: ManagerData = { id: managerDoc.id, ...managerDoc.data() };
 
-    // Transactions aggregation - check both liveManagerId and teamManagerId
-    let liveQuery: FirebaseFirestore.Query<FirebaseFirestore.DocumentData> = db
-      .collection("transactions")
-      .where("liveManagerId", "==", managerId);
-    if (period) {
-      liveQuery = liveQuery.where("period", "==", period);
-    }
-    const liveSnap = await liveQuery.get();
-
-    let teamQuery: FirebaseFirestore.Query<FirebaseFirestore.DocumentData> = db
-      .collection("transactions")
-      .where("teamManagerId", "==", managerId);
-    if (period) {
-      teamQuery = teamQuery.where("period", "==", period);
-    }
-    const teamSnap = await teamQuery.get();
-
+    // Get earnings from manager-earnings collection if period is specified
     let gross = 0,
       bonusSum = 0,
       net = 0,
-      txCount = 0;
+      txCount = 0,
+      baseCommission = 0;
 
-    // Process live transactions
-    liveSnap.forEach((doc) => {
-      const d = doc.data();
-      gross += d.grossAmount || 0;
-      bonusSum += d.bonusSum || 0;
-      net += d.net || 0; // Fixed: use 'net' instead of 'netAmount'
-      txCount += 1;
-    });
-
-    // Process team transactions
-    teamSnap.forEach((doc) => {
-      const d = doc.data();
-      gross += d.grossAmount || 0;
-      bonusSum += d.bonusSum || 0;
-      net += d.net || 0; // Fixed: use 'net' instead of 'netAmount'
-      txCount += 1;
-    });
+    if (period) {
+      const earningsDoc = await db.collection("manager-earnings").doc(`${managerId}_${period}`).get();
+      if (earningsDoc.exists) {
+        const earningsData = earningsDoc.data();
+        gross = earningsData?.totalGross || 0;
+        net = earningsData?.totalNet || 0;
+        baseCommission = earningsData?.baseCommission || 0;
+        txCount = earningsData?.transactionCount || 0;
+        bonusSum = earningsData?.bonuses || 0;
+      }
+    } else {
+      // If no period specified, aggregate all transactions
+      const transactionsQuery = db.collection("transactions").where("managerId", "==", managerId);
+      const transactionsSnap = await transactionsQuery.get();
+      
+      transactionsSnap.forEach((doc) => {
+        const d = doc.data();
+        gross += d.grossAmount || 0;
+        net += d.netForCommission || 0;
+        baseCommission += d.baseCommission || 0;
+        txCount += 1;
+      });
+    }
 
     // Bonuses aggregation by type
     let bonusQuery: FirebaseFirestore.Query<FirebaseFirestore.DocumentData> = db
       .collection("bonuses")
       .where("managerId", "==", managerId);
     if (period) {
-      bonusQuery = bonusQuery.where("period", "==", period);
+      bonusQuery = bonusQuery.where("month", "==", period);
     }
     const bonusSnap = await bonusQuery.get();
-
-    let baseCommission = 0;
     const milestoneBonuses = {
       halfMilestone: 0, // S
       milestone1: 0,    // N

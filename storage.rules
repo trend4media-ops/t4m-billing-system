@@ -2,14 +2,22 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
-    // Allow admins to upload commission files
+    // Allow admins to upload and read commission files
     match /uploads/{period}/{allPaths=**} {
-      allow write: if request.auth != null && request.auth.token.role == 'admin';
+      allow read, write: if request.auth != null && 
+        (request.auth.token.role == 'ADMIN' || 
+         request.auth.token.role == 'admin' ||
+         request.auth.token.email == 'admin@trend4media.com');
     }
 
-    // Allow read access for other files if needed (e.g., public images)
-    // match /public/{allPaths=**} {
-    //   allow read;
-    // }
+    // Allow read access for public assets
+    match /public/{allPaths=**} {
+      allow read;
+    }
+    
+    // Block all other access
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
   }
 } 

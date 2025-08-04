@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import * as jwt from "jsonwebtoken";
+import * as admin from "firebase-admin";
 
 export interface AuthenticatedRequest extends Request {
   user?: {
@@ -12,9 +12,6 @@ export interface AuthenticatedRequest extends Request {
     [key: string]: any;
   };
 }
-
-// JWT Secret - should match the one in login.ts
-const JWT_SECRET = 'trend4media_secret_key_2024_secure';
 
 export async function authMiddleware(
   req: AuthenticatedRequest,
@@ -31,30 +28,46 @@ export async function authMiddleware(
       return;
     }
 
-    const token = authHeader.substring(7);
-    console.log('🔍 Verifying JWT token...');
+    const idToken = authHeader.substring(7);
+    console.log('🔍 Verifying Firebase ID token...');
 
-    // Verify JWT token
-    const decoded = jwt.verify(token, JWT_SECRET) as any;
-    console.log('✅ Token verified:', decoded);
+    // Verify Firebase ID token
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    console.log('✅ Firebase token verified for UID:', decodedToken.uid);
+
+    // Get custom claims
+    const userRecord = await admin.auth().getUser(decodedToken.uid);
+    const customClaims = userRecord.customClaims || {};
+    
+    console.log('📋 User claims:', customClaims);
 
     req.user = {
-      uid: decoded.uid,
-      role: decoded.role || 'user',
-      email: decoded.email,
-      firstName: decoded.firstName,
-      lastName: decoded.lastName,
-      managerId: decoded.managerId
+      uid: decodedToken.uid,
+      email: decodedToken.email,
+      role: customClaims.role || 'MANAGER',
+      managerId: customClaims.managerId,
+      firstName: customClaims.firstName || '',
+      lastName: customClaims.lastName || '',
+      ...customClaims
     };
 
-    console.log('✅ User set in request:', req.user);
+    console.log('✅ User authenticated:', {
+      uid: req.user.uid,
+      email: req.user.email,
+      role: req.user.role,
+      managerId: req.user.managerId
+    });
+    
     next();
-  } catch (error) {
+  } catch (error: any) {
     console.error("💥 Auth error:", error);
-    if (error instanceof jwt.JsonWebTokenError) {
-      res.status(401).json({ error: "Invalid token" });
-    } else if (error instanceof jwt.TokenExpiredError) {
+    
+    if (error.code === 'auth/id-token-expired') {
       res.status(401).json({ error: "Token expired" });
+    } else if (error.code === 'auth/id-token-revoked') {
+      res.status(401).json({ error: "Token revoked" });
+    } else if (error.code === 'auth/argument-error') {
+      res.status(401).json({ error: "Invalid token format" });
     } else {
       res.status(401).json({ error: "Authentication failed" });
     }
