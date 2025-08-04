@@ -8,7 +8,7 @@
 
 Das 4M-Abrechnungssystem für trend4media wurde komplett überarbeitet. Die neue Version 2.0 implementiert eine präzise Kommissions-Berechnung mit:
 - **Festen Milestone-Bonusbeträgen** basierend auf Manager-Typ (Live vs Team)
-- **Diamond-Target-Bonus** von 500€ bei Erreichen von 120% des Vormonats-Nets
+- **Diamond-Target-Bonus** von 50€ (Live Manager) / 60€ (Team Manager) bei Erreichen von 120% des Vormonats-Nets
 - **Downline-Provision** basierend auf NET-Beträgen der Downline-Manager
 - **Vereinfachter Berechnungslogik** ohne variable Bonus-Werte
 
@@ -83,12 +83,13 @@ const milestoneBonuses = {
 ### **5. DIAMOND-TARGET-BONUS (NEU!)**
 
 ```javascript
-// Diamond Bonus: 500€ wenn net ≥ 1,2 × previousNet
-const diamondBonus = (net >= previousNet * 1.2) ? 500 : 0;
+// Diamond Bonus: 50€ (Live) / 60€ (Team) wenn net ≥ 1,2 × previousNet
+const diamondBonusAmount = managerType === 'LIVE' ? 50 : 60;
+const diamondBonus = (net >= previousNet * 1.2) ? diamondBonusAmount : 0;
 ```
 
 **Bedingung:** Aktueller NET-Betrag ≥ 120% des NET-Betrags vom Vormonat  
-**Betrag:** Feste 500€ (nicht konfigurierbar)
+**Betrag:** 50€ für Live Manager, 60€ für Team Manager
 
 ### **6. RECRUITMENT-BONUS (unverändert)**
 
@@ -316,8 +317,8 @@ Input:
   Manager: LIVE
 
 Expected:
-  diamondBonus: 500 € (1550 ≥ 1.2 × 1000 = 1200 ✓)
-  totalEarnings: 1590 € (465+500+75+150+400)
+  diamondBonus: 50 € (1550 ≥ 1.2 × 1000 = 1200 ✓) - Live Manager
+  totalEarnings: 1140 € (465+50+75+150+400)
 ```
 
 ### **Test Case 4: Downline-Provision**
@@ -348,7 +349,7 @@ Expected:
 - **NEUE** Milestone-Bonus-Beträge:
   - Live: S=75€, N=150€, O=400€, P=100€
   - Team: S=80€, N=165€, O=450€, P=120€
-- Diamond-Bonus: Fest 500€ bei 120% Schwelle
+- Diamond-Bonus: 50€ (Live) / 60€ (Team) bei 120% Schwelle
 - Downline-Provision Prozentsätze (10%, 7.5%, 5%)
 
 ### **2. IMMER VALIDIEREN**
@@ -402,7 +403,7 @@ Bei Unklarheiten zur **NEUEN** Commission-Logic v2.0:
 - Excel-Processing mit neuen festen Abzügen
 - Backend-Service mit manager-spezifischen Milestone-Bonussen  
 - Frontend-API mit neuer gross/bonusSum/net-Struktur
-- Diamond-Target-Bonus (500€) implementiert
+- Diamond-Target-Bonus (50€ Live / 60€ Team) implementiert
 - Downline-Provision auf net-Basis umgestellt
 - Umfassende Tests für alle Szenarien
 - Dokumentation vollständig aktualisiert

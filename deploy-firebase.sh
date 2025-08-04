@@ -28,9 +28,10 @@ if ! firebase projects:list &> /dev/null; then
 fi
 
 # Install Functions dependencies
-echo -e "${BLUE}📦 Installing Functions dependencies...${NC}"
+echo -e "${BLUE}📦 Installing Functions dependencies and building...${NC}"
 cd functions
 npm install
+npm run build
 cd ..
 
 # Build Frontend

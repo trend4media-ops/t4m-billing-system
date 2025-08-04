@@ -2,11 +2,14 @@
   "name": "t4m-billing-system",
   "version": "1.0.0",
   "description": "T4M Billing and Commission Management System - Firebase Edition",
+  "main": "lib/index.js",
   "scripts": {
+    "test": "jest",
+    "lint": "eslint --ext .js,.ts .",
+    "build": "tsc",
     "dev": "firebase emulators:start",
     "start": "cd trend4media-frontend && npm run dev",
     "start:prod": "cd trend4media-frontend && npm run start:prod",
-    "build": "cd trend4media-frontend && npm run build && npm run export",
     "deploy": "./deploy-firebase.sh",
     "deploy:functions": "firebase deploy --only functions",
     "deploy:hosting": "firebase deploy --only hosting",
@@ -34,6 +37,8 @@
     "node": "18"
   },
   "dependencies": {
+    "axios": "^1.11.0",
+    "firebase-admin": "^13.4.0",
     "xlsx": "^0.18.5"
   }
 }

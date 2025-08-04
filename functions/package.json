@@ -3,38 +3,45 @@
   "description": "Firebase Cloud Functions for T4M Billing System",
   "version": "1.0.0",
   "scripts": {
-    "build": "echo 'No build needed - using JS directly'",
-    "build:watch": "echo 'No build needed - using JS directly'",
-    "serve": "firebase emulators:start --only functions",
-    "shell": "firebase functions:shell",
+    "build": "tsc -p tsconfig.json",
+    "build:watch": "tsc -w -p tsconfig.json",
+    "serve": "npm run build && firebase emulators:start --only functions",
+    "shell": "npm run build && firebase functions:shell",
     "start": "npm run shell",
-    "deploy": "firebase deploy --only functions",
+    "deploy": "npm run build && firebase deploy --only functions",
     "logs": "firebase functions:log",
     "test": "jest",
     "test:watch": "jest --watch",
-    "lint": "eslint *.js --fix"
+    "lint": "eslint src --ext .ts --fix"
   },
   "engines": {
     "node": "20"
   },
   "main": "index.js",
   "dependencies": {
+    "bcrypt": "^5.1.1",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
     "firebase-admin": "^12.7.0",
     "firebase-functions": "^6.4.0",
-    "express": "^4.21.2",
-    "cors": "^2.8.5",
     "helmet": "^8.0.0",
+    "joi": "^17.13.3",
     "jsonwebtoken": "^9.0.2",
-    "bcrypt": "^5.1.1",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^6.9.17",
     "xlsx": "^0.18.5",
-    "joi": "^17.13.3"
+    "zod": "^4.0.14"
   },
   "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/jest": "^30.0.0",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.1.0",
     "eslint": "^9.18.0",
+    "firebase-functions-test": "^3.3.0",
     "jest": "^29.7.0",
-    "firebase-functions-test": "^3.3.0"
+    "ts-jest": "^29.4.1",
+    "typescript": "^5.4.0"
   },
   "private": true
-} 
+}

@@ -1,48 +1,80 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Users can only access their own data
+
+    ////////////////////////////////////////////////////////
+    //  USERS (profil-spiegel)
+    ////////////////////////////////////////////////////////
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
-    
-    // Managers - admins can read/write all, managers can read own data
+
+    ////////////////////////////////////////////////////////
+    //  MANAGERS – Admin voll, Manager nur eigenes Profil
+    ////////////////////////////////////////////////////////
     match /managers/{managerId} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null;
+      allow write: if request.auth != null && (
+        request.auth.token.role == 'admin' ||  // Admin darf alles
+        (request.auth.token.role == 'manager' && request.auth.token.managerId == managerId) // Manager nur eigenes
+      );
     }
-    
-    // Creators - read for authenticated users, write for admin/functions
-    match /creators/{creatorId} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null;
+
+    ////////////////////////////////////////////////////////
+    //  TRANSACTIONS – schreibbar nur über Cloud Functions (Admin SDK)
+    ////////////////////////////////////////////////////////
+    match /transactions/{txId} {
+      allow read: if request.auth != null && (
+        request.auth.token.role == 'admin' ||
+        request.auth.token.managerId == resource.data.managerId
+      );
+      allow write: if false; // ausschliesslich Server-SDK
     }
-    
-    // Transactions - read for authenticated users, write for admin/functions
-    match /transactions/{transactionId} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null;
-    }
-    
-    // Upload batches - admin only
-    match /uploadBatches/{batchId} {
-      allow read, write: if request.auth != null;
-    }
-    
-    // Genealogy - read for authenticated users, write for admin
-    match /genealogy/{genealogyId} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null;
-    }
-    
-    // Admin-only collections
-    match /audit-logs/{logId} {
-      allow read, write: if request.auth != null;
-    }
-    
+
+    ////////////////////////////////////////////////////////
+    //  BONUSES – analog Transactions
+    ////////////////////////////////////////////////////////
     match /bonuses/{bonusId} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null;
+      allow read: if request.auth != null && (
+        request.auth.token.role == 'admin' ||
+        request.auth.token.managerId == resource.data.managerId
+      );
+      allow write: if false;
+    }
+
+    ////////////////////////////////////////////////////////
+    //  UPLOAD BATCHES – nur Admin lesend & schreibend
+    ////////////////////////////////////////////////////////
+    match /uploadBatches/{batchId} {
+      allow read, write: if request.auth != null && request.auth.token.role == 'admin';
+    }
+
+    ////////////////////////////////////////////////////////
+    //  PAYOUT REQUESTS
+    ////////////////////////////////////////////////////////
+    match /payoutRequests/{reqId} {
+      allow create: if request.auth != null && request.auth.token.role == 'manager' && request.resource.data.managerId == request.auth.token.managerId;
+      allow read: if request.auth != null && (
+        request.auth.token.role == 'admin' || request.auth.token.managerId == resource.data.managerId
+      );
+      allow update, delete: if request.auth != null && request.auth.token.role == 'admin';
+    }
+
+    ////////////////////////////////////////////////////////
+    //  MESSAGES – private Inbox
+    ////////////////////////////////////////////////////////
+    match /messages/{msgId} {
+      allow read, update: if request.auth != null && request.auth.uid == resource.data.userId;
+      allow create: if request.auth != null; // Admin SDK oder Funktionen
+      allow delete: if request.auth != null && request.auth.token.role == 'admin';
+    }
+
+    ////////////////////////////////////////////////////////
+    //  AUDIT LOGS – read-only für Admin
+    ////////////////////////////////////////////////////////
+    match /auditLogs/{logId} {
+      allow read: if request.auth != null && request.auth.token.role == 'admin';
+      allow write: if false;
     }
   }
 } 

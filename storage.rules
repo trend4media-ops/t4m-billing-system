@@ -1,0 +1,15 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Allow admins to upload commission files
+    match /uploads/{period}/{allPaths=**} {
+      allow write: if request.auth != null && request.auth.token.role == 'admin';
+    }
+
+    // Allow read access for other files if needed (e.g., public images)
+    // match /public/{allPaths=**} {
+    //   allow read;
+    // }
+  }
+} 
