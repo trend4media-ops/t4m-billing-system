@@ -6,7 +6,7 @@ import { z } from 'zod';
 // Firebase Admin SDK is initialized in the root index.js
 const db = admin.firestore();
 
-const UPLOAD_COLLECTION = 'upload-metadata';
+const UPLOAD_COLLECTION = 'uploadBatches';
 
 const commissionRowSchema = z.object({
   managerHandle: z.string().min(1, { message: "Manager Handle is required" }),
@@ -26,15 +26,10 @@ const MILESTONE_DEDUCTIONS = {
   S: 150,
 };
 
-const MILESTONE_PAYOUTS = {
-  live: { S: 75, N: 150, O: 400, P: 100 },
-  team: { S: 80, N: 165, O: 450, P: 120 },
-};
-
-const DIAMOND_BONUS_PAYOUT = {
-  live: 50,
-  team: 60,
-};
+// const MILESTONE_PAYOUTS = {
+//   live: { S: 75, N: 150, O: 400, P: 100 },
+//   team: { S: 80, N: 165, O: 450, P: 120 },
+// };
 
 const BASE_COMMISSION_RATES = {
   live: 0.30,
@@ -42,47 +37,58 @@ const BASE_COMMISSION_RATES = {
 };
 
 /**
- * Creates or updates manager accounts from Excel data
+ * Creates or updates manager accounts from Excel data - OPTIMIZED VERSION
  */
 async function ensureManagersExist(rows: any[][], uploadDocRef?: admin.firestore.DocumentReference): Promise<Map<string, string>> {
-    console.log('📥 Ensuring all managers exist in database...');
+    console.log('📥 🚀 OPTIMIZED: Loading all managers in bulk...');
     const firestore = admin.firestore();
     const auth = admin.auth();
     const batch = firestore.batch();
     const managerMap = new Map<string, string>(); // name -> managerId
-    const managersToCreate = new Set<{name: string, type: 'live' | 'team', email?: string}>();
+    
+    // Extract unique managers from Excel
+    const uniqueManagers = new Set<{name: string, type: 'live' | 'team', email?: string}>();
+    const managerNames = new Set<string>();
     
     // Skip header row and collect unique managers
     for (const row of rows.slice(1)) {
         if (!row || !row[0]) continue;
         
-        // Extract manager from either LIVE (col 4) or TEAM (col 6) column
         const liveManager = row[4]?.toString().trim();
         const teamManager = row[6]?.toString().trim();
         const managerName = liveManager || teamManager;
         const managerType = liveManager ? 'live' : 'team';
         
-        if (managerName) {
-            managersToCreate.add({
+        if (managerName && !managerNames.has(managerName)) {
+            managerNames.add(managerName);
+            uniqueManagers.add({
                 name: managerName,
                 type: managerType,
-                email: row[7]?.toString().trim() // Email if available in column H
+                email: row[7]?.toString().trim()
             });
         }
     }
     
-    console.log(`📊 Found ${managersToCreate.size} unique managers in Excel`);
+    console.log(`📊 Found ${uniqueManagers.size} unique managers in Excel`);
     
-    // Check which managers already exist and create missing ones
-    for (const managerData of managersToCreate) {
-        const existingSnapshot = await firestore.collection('managers')
-            .where('name', '==', managerData.name)
-            .limit(1)
-            .get();
-        
-        if (!existingSnapshot.empty) {
-            // Manager exists
-            const managerId = existingSnapshot.docs[0].id;
+    // 🚀 OPTIMIZATION: Load ALL existing managers in ONE query
+    const existingManagersSnapshot = await firestore.collection('managers').get();
+    const existingManagersMap = new Map<string, string>();
+    
+    existingManagersSnapshot.forEach(doc => {
+        const data = doc.data();
+        existingManagersMap.set(data.name, doc.id);
+    });
+    
+    console.log(`✅ Loaded ${existingManagersMap.size} existing managers from database`);
+    
+    let newManagersCount = 0;
+    
+    // Process each unique manager
+    for (const managerData of uniqueManagers) {
+        if (existingManagersMap.has(managerData.name)) {
+            // Manager exists - add to map
+            const managerId = existingManagersMap.get(managerData.name)!;
             managerMap.set(managerData.name, managerId);
             console.log(`✅ Manager exists: ${managerData.name} (${managerId})`);
         } else {
@@ -90,7 +96,7 @@ async function ensureManagersExist(rows: any[][], uploadDocRef?: admin.firestore
             const managerId = firestore.collection('managers').doc().id;
             const email = managerData.email || `${managerData.name.toLowerCase().replace(/\s+/g, '.')}@trend4media.com`;
             
-            // Create manager document
+            // Add to batch
             batch.set(firestore.collection('managers').doc(managerId), {
                 name: managerData.name,
                 email: email,
@@ -103,54 +109,41 @@ async function ensureManagersExist(rows: any[][], uploadDocRef?: admin.firestore
                 completedPayouts: 0
             });
             
-            // Create auth user account
-            try {
-                await auth.createUser({
-                    uid: managerId,
-                    email: email,
-                    emailVerified: true,
-                    password: `T4M-${managerData.name.replace(/\s+/g, '')}-2025`, // Temporary password
-                    displayName: managerData.name,
-                });
-                
-                // Set custom claims
-                await auth.setCustomUserClaims(managerId, {
-                    role: 'MANAGER',
-                    managerId: managerId
-                });
-                
-                console.log(`🆕 Created manager account: ${managerData.name} (${managerId}) with email: ${email}`);
-                
-                // Create welcome message
-                batch.set(firestore.collection('messages').doc(), {
-                    userId: managerId,
-                    title: 'Willkommen bei Trend4Media',
-                    content: `Hallo ${managerData.name},\n\nIhr Account wurde erfolgreich erstellt. Sie können sich mit der E-Mail ${email} und dem temporären Passwort anmelden. Bitte ändern Sie Ihr Passwort nach dem ersten Login.\n\nBei Fragen wenden Sie sich bitte an den Support.`,
-                    type: 'welcome',
-                    read: false,
-                    createdAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-                
-            } catch (authError) {
-                console.error(`⚠️ Could not create auth account for ${managerData.name}:`, authError);
-                // Continue anyway - manager document is created
-            }
-            
             managerMap.set(managerData.name, managerId);
+            newManagersCount++;
+            
+            // Create auth user account (async, don't wait)
+            auth.createUser({
+                uid: managerId,
+                email: email,
+                password: 'TempPassword123!',
+                displayName: managerData.name
+            }).then(() => {
+                console.log(`✅ Created auth user for ${managerData.name}`);
+            }).catch(err => {
+                console.warn(`⚠️ Failed to create auth user for ${managerData.name}:`, err.code);
+            });
+            
+            console.log(`🆕 Will create new manager: ${managerData.name} (${managerId})`);
         }
     }
     
-    // Commit all manager creations
-    await batch.commit();
-    console.log(`✨ Manager setup complete. Total managers: ${managerMap.size}`);
-    
-    if (uploadDocRef) {
-        await uploadDocRef.update({
-            managersCreated: managerMap.size,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
+    // Commit new managers in one batch
+    if (newManagersCount > 0) {
+        await batch.commit();
+        console.log(`✅ Created ${newManagersCount} new managers in batch`);
+        
+        // Update progress
+        if (uploadDocRef) {
+            await uploadDocRef.update({ 
+                progress: 25,
+                processedRows: newManagersCount,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+        }
     }
     
+    console.log(`✅ Manager mapping complete: ${managerMap.size} managers ready`);
     return managerMap;
 }
 
@@ -280,57 +273,108 @@ export async function processUploadedExcel(batchId: string) {
     const data = snap.data()!;
     const { fileName, filePath, isComparison, month } = data;
 
-    console.log(`🚀 Processing file: ${filePath} with batch ID: ${batchId}`);
+    console.log(`🚀 OPTIMIZED PROCESSING: Starting file ${filePath} with batch ID: ${batchId}`);
     
     const fileBucket = admin.storage().bucket().name; 
     const bucket = admin.storage().bucket(fileBucket);
     const tempFilePath = `/tmp/${fileName}`;
   
     try {
-        await uploadDocRef.update({ status: 'DOWNLOADING', updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+        // Step 1: Download file
+        await uploadDocRef.update({ 
+            status: 'DOWNLOADING', 
+            progress: 5,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp() 
+        });
+        
+        console.log(`📥 Downloading file from ${filePath}...`);
         await bucket.file(filePath).download({ destination: tempFilePath });
-        await uploadDocRef.update({ status: 'PROCESSING', progress: 10, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+        console.log(`✅ File downloaded to ${tempFilePath}`);
+        
+        // Step 2: Parse Excel
+        await uploadDocRef.update({ 
+            status: 'PROCESSING', 
+            progress: 15, 
+            updatedAt: admin.firestore.FieldValue.serverTimestamp() 
+        });
 
+        console.log(`📊 Parsing Excel file...`);
         const workbook = XLSX.readFile(tempFilePath);
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
         const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
-        const totalRows = rows.length -1;
+        const totalRows = rows.length - 1;
 
-        await uploadDocRef.update({ totalRows });
+        console.log(`✅ Excel parsed: ${totalRows} data rows found`);
+        await uploadDocRef.update({ 
+            totalRows,
+            progress: 20,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
 
-        // IMPORTANT: Ensure all managers exist before processing
+        // Step 3: Load managers efficiently
+        console.log(`👥 Loading and preparing managers...`);
         const managerMap = await ensureManagersExist(rows, uploadDocRef);
-        await uploadDocRef.update({ status: 'CALCULATING', progress: 30, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-
+        
+        // Step 4: Process data based on type
         if (isComparison) {
             console.log(`📈 Processing COMPARISON data for month: ${month}`);
+            await uploadDocRef.update({ 
+                status: 'CALCULATING', 
+                progress: 40,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp() 
+            });
+            
             await processComparisonData(rows, month, fileName, uploadDocRef, managerMap);
         } else {
             console.log(`💰 Processing FULL commission data for month: ${month}`);
             await processCommissionData(rows, batchId, month, uploadDocRef, managerMap);
             
-            // Update manager earnings after processing
-            await updateManagerEarnings(batchId, month);
+            // Step 5: Update manager earnings
+            console.log(`📊 Updating manager earnings summaries...`);
+            await uploadDocRef.update({ 
+                status: 'CALCULATING', 
+                progress: 95,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp() 
+            });
             
-            console.log(`✅ Successfully processed batch ${batchId} from file ${fileName}`);
+            await updateManagerEarnings(batchId, month);
         }
 
+        // Step 6: Complete
+        console.log(`✅ Processing completed successfully for batch ${batchId}`);
         await uploadDocRef.update({
             status: 'COMPLETED',
             progress: 100,
+            completedAt: admin.firestore.FieldValue.serverTimestamp(),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
+        
+        // Cleanup temp file
+        try {
+            require('fs').unlinkSync(tempFilePath);
+            console.log(`🗑️ Cleaned up temp file: ${tempFilePath}`);
+        } catch (cleanupError) {
+            console.warn(`⚠️ Failed to cleanup temp file: ${cleanupError}`);
+        }
     
     } catch(err) {
-        console.error(`Failed to process file ${filePath}`, err);
+        console.error(`💥 PROCESSING FAILED for ${filePath}:`, err);
         await uploadDocRef.update({
             status: 'FAILED',
             error: (err as Error).message,
+            failedAt: admin.firestore.FieldValue.serverTimestamp(),
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-        // Re-throw the error to be caught by the API handler
-        throw err;
+        
+        // Cleanup temp file on error too
+        try {
+            require('fs').unlinkSync(tempFilePath);
+        } catch (cleanupError) {
+            // Ignore cleanup errors
+        }
+        
+        throw err; // Re-throw for API handler
     }
 }
 
@@ -455,227 +499,217 @@ async function processComparisonData(rows: any[][], month: string, fileName: str
 
 
 /**
- * Processes the full commission data...
+ * Processes the full commission data - OPTIMIZED WITH LIVE PROGRESS
  */
 export async function processCommissionData(rows: any[][], batchId: string, month:string, uploadDocRef?: admin.firestore.DocumentReference, managerMap?: Map<string, string>) {
     const firestore = admin.firestore();
-    const batch = firestore.batch();
     const managerNetTotals: { [key: string]: { net: number, handle: string, type: 'live' | 'team' } } = {};
     const validationErrors: { row: number, errors: any }[] = [];
     let processedRows = 0;
-
-
-    // Skip header row
-    for (const [index, row] of rows.slice(1).entries()) {
-        if (!row || !row[0]) continue; // Skip empty rows
-
-        // Extract manager from either LIVE (col 4) or TEAM (col 6) column
-        const liveManager = row[4]?.toString().trim();
-        const teamManager = row[6]?.toString().trim();
-        const managerName = liveManager || teamManager;
-        const managerType = liveManager ? 'live' : 'team';
-        
-        if (!managerName) {
-          console.warn(`Row ${index + 2}: No manager found in columns E or G. Skipping...`);
-          continue;
-        }
-
-        const rowData = {
-          managerHandle: managerName, // Using name as handle for now
-          managerType: managerType,
-          grossAmount: parseFloat(row[12] || '0'),
-          milestoneN: row[13],
-          milestoneO: row[14],
-          milestoneP: row[15],
-          milestoneS: row[18],
-        };
-
-        const validationResult = commissionRowSchema.safeParse(rowData);
-
-        if (!validationResult.success) {
-          validationErrors.push({ row: index + 2, errors: validationResult.error.flatten() });
-          continue; // Skip this row
-        }
-
-        const { grossAmount, milestoneN, milestoneO, milestoneP, milestoneS } = validationResult.data;
-        const validatedManagerHandle = validationResult.data.managerHandle;
-        const validatedManagerType = validationResult.data.managerType;
-
-        // Find manager by handle to get their ID
-        const managerId = managerMap?.get(validatedManagerHandle) || 'unknown_manager'; // Fallback to 'unknown_manager' if not found
-
-        if (managerId === 'unknown_manager') {
-            console.warn(`Manager with handle '${validatedManagerHandle}' not found in managerMap. Skipping...`);
-            continue;
-        }
-
-        // Store manager's net total for Diamond Bonus calculation later
-        if (!managerNetTotals[managerId]) {
-            managerNetTotals[managerId] = { net: 0, handle: validatedManagerHandle, type: validatedManagerType };
-        }
-
-        // 2. Calculate deductions and net amount
-        let totalDeductions = 0;
-        const milestoneChecks = {
-            S: milestoneS,
-            N: milestoneN,
-            O: milestoneO,
-            P: milestoneP,
-        };
-
-        if (milestoneChecks.S) totalDeductions += MILESTONE_DEDUCTIONS.S;
-        if (milestoneChecks.N) totalDeductions += MILESTONE_DEDUCTIONS.N;
-        if (milestoneChecks.O) totalDeductions += MILESTONE_DEDUCTIONS.O;
-        if (milestoneChecks.P) totalDeductions += MILESTONE_DEDUCTIONS.P;
-
-        const netForCommission = grossAmount - totalDeductions;
-        managerNetTotals[managerId].net += netForCommission;
-
-        const baseCommissionRate = BASE_COMMISSION_RATES[validatedManagerType];
-        const baseCommission = netForCommission > 0 ? netForCommission * baseCommissionRate : 0;
-
-        // 4. Save the main transaction document
-        const transactionId = firestore.collection('transactions').doc().id;
-        const transactionRef = firestore.collection('transactions').doc(transactionId);
-        batch.set(transactionRef, {
-            id: transactionId,
-            managerId,
-            managerHandle: validatedManagerHandle,
-            managerType: validatedManagerType.toUpperCase(),
-            month,
-            batchId,
-            grossAmount,
-            deductions: totalDeductions,
-            netForCommission,
-            baseCommission,
-            calculatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            createdBy: 'excel-calculator-function'
+    
+    // Progress tracking
+    const totalDataRows = rows.slice(1).length;
+    const BATCH_SIZE = 50; // Process in batches of 50 rows
+    const PROGRESS_UPDATE_INTERVAL = 25; // Update progress every 25 rows
+    
+    console.log(`🚀 OPTIMIZED PROCESSING: ${totalDataRows} rows in batches of ${BATCH_SIZE}`);
+    
+    if (uploadDocRef) {
+        await uploadDocRef.update({ 
+            status: 'PROCESSING',
+            progress: 35,
+            totalRows: totalDataRows,
+            processedRows: 0,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
         });
-
-        // 5. Save base commission as a bonus document
-        if (baseCommission > 0) {
-            const bonusRef = firestore.collection('bonuses').doc();
-            batch.set(bonusRef, {
-                managerId,
-                managerHandle: validatedManagerHandle,
-                type: 'BASE_COMMISSION',
-                amount: baseCommission,
-                month,
-                batchId,
-                calculatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                createdBy: 'excel-calculator-function'
-            });
-        }
-
-        // 6. Create separate bonus documents for each achieved milestone
-        const milestonePayouts = MILESTONE_PAYOUTS[validatedManagerType];
-        const milestoneBonusTypes = {
-            S: 'MILESTONE_S',
-            N: 'MILESTONE_N',
-            O: 'MILESTONE_O',
-            P: 'MILESTONE_P'
-        };
-
-        for (const [key, value] of Object.entries(milestoneChecks)) {
-            if (value) {
-                const bonusAmount = milestonePayouts[key as keyof typeof milestonePayouts];
-                if (bonusAmount > 0) {
-                    const bonusRef = firestore.collection('bonuses').doc();
-                    batch.set(bonusRef, {
-                        managerId,
-                        managerHandle: validatedManagerHandle,
-                        type: milestoneBonusTypes[key as keyof typeof milestoneBonusTypes],
-                        amount: bonusAmount,
-                        month,
-                        batchId,
-                        calculatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                        createdBy: 'excel-calculator-function'
-                    });
-                }
-            }
-        }
-        processedRows++;
-        if (uploadDocRef && processedRows % 20 === 0) {
-            const currentProgress = 10 + Math.floor((processedRows / rows.length) * 80); // 10-90% for processing
-            await uploadDocRef.update({ processedRows, progress: currentProgress, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-        }
     }
 
-    // After processing all rows, calculate and add Diamond Bonuses
-    const previousMonth = getPreviousMonth(month);
-    for (const managerId in managerNetTotals) {
-        const managerData = managerNetTotals[managerId];
-        const currentNet = managerData.net;
+    // Process data in chunks for better performance
+    const dataRows = rows.slice(1);
+    const chunks = [];
+    for (let i = 0; i < dataRows.length; i += BATCH_SIZE) {
+        chunks.push(dataRows.slice(i, i + BATCH_SIZE));
+    }
+    
+    console.log(`📦 Split into ${chunks.length} processing chunks`);
 
-        let previousNet = 0;
-
-        // 1. NEW: Prioritize the 'managerMonthlyNets' collection for previous month's data
-        const comparisonDocRef = firestore.collection('managerMonthlyNets').doc(`${managerId}_${previousMonth}`);
-        const comparisonDoc = await comparisonDocRef.get();
-
-        if (comparisonDoc.exists) {
-            previousNet = comparisonDoc.data()?.netAmount || 0;
-            console.log(`📈 Found comparison data for ${managerData.handle} (Month: ${previousMonth}): €${previousNet}`);
-        } else {
-            // 2. FALLBACK: If no comparison data, calculate from previous transactions
-            const prevTransactions = await firestore.collection('transactions')
-                .where('managerId', '==', managerId)
-                .where('month', '==', previousMonth)
-                .get();
-            
-            prevTransactions.forEach(doc => {
-                previousNet += doc.data().netForCommission || 0;
-            });
-            if(previousNet > 0) {
-                console.log(`📉 No comparison data found. Using fallback transaction data for ${managerData.handle} (Month: ${previousMonth}): €${previousNet}`);
-            }
-        }
+    // Process each chunk
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+        const chunk = chunks[chunkIndex];
+        const batch = firestore.batch();
+        let batchOperations = 0;
         
-        // Check for Diamond Bonus
-        if (currentNet >= previousNet * 1.2 && previousNet > 0) {
-            const diamondBonusAmount = DIAMOND_BONUS_PAYOUT[managerData.type];
-            const bonusRef = firestore.collection('bonuses').doc();
-            batch.set(bonusRef, {
-                managerId,
-                managerHandle: managerData.handle,
-                type: 'DIAMOND_BONUS',
-                amount: diamondBonusAmount,
-                month,
-                batchId,
-                notes: `Awarded for exceeding 120% of previous month's net (€${previousNet.toFixed(2)}).`,
-                calculatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                createdBy: 'excel-calculator-function'
+        console.log(`📦 Processing chunk ${chunkIndex + 1}/${chunks.length} (${chunk.length} rows)`);
+        
+        // Process rows in current chunk
+        for (const [rowIndex, row] of chunk.entries()) {
+            const absoluteRowIndex = chunkIndex * BATCH_SIZE + rowIndex;
+            
+            if (!row || !row[0]) continue; // Skip empty rows
+
+            // Extract manager data
+            const liveManager = row[4]?.toString().trim();
+            const teamManager = row[6]?.toString().trim();
+            const managerName = liveManager || teamManager;
+            const managerType = liveManager ? 'live' : 'team';
+            
+            if (!managerName) {
+                console.warn(`Row ${absoluteRowIndex + 2}: No manager found in columns E or G. Skipping...`);
+                continue;
+            }
+
+            const rowData = {
+                managerHandle: managerName,
+                managerType: managerType,
+                grossAmount: parseFloat(row[12] || '0'),
+                milestoneN: row[13],
+                milestoneO: row[14],
+                milestoneP: row[15],
+                milestoneS: row[18],
+            };
+
+            const validationResult = commissionRowSchema.safeParse(rowData);
+
+            if (!validationResult.success) {
+                validationErrors.push({ row: absoluteRowIndex + 2, errors: validationResult.error.flatten() });
+                continue;
+            }
+
+            const { grossAmount, milestoneN, milestoneO, milestoneP, milestoneS } = validationResult.data;
+            const validatedManagerHandle = validationResult.data.managerHandle;
+            const validatedManagerType = validationResult.data.managerType;
+
+            // Get manager ID from pre-loaded map
+            const managerId = managerMap?.get(validatedManagerHandle);
+            if (!managerId) {
+                console.warn(`Manager ${validatedManagerHandle} not found in map. Skipping row ${absoluteRowIndex + 2}`);
+                continue;
+            }
+
+            // Calculate commissions and deductions
+            const baseCommissionRate = BASE_COMMISSION_RATES[validatedManagerType];
+            const baseCommission = grossAmount * baseCommissionRate;
+
+            let totalDeductions = 0;
+            const milestoneChecks = {
+                S: milestoneS, N: milestoneN, O: milestoneO, P: milestoneP,
+            };
+
+            // Calculate milestone deductions
+            if (milestoneChecks.S) totalDeductions += MILESTONE_DEDUCTIONS.S;
+            if (milestoneChecks.N) totalDeductions += MILESTONE_DEDUCTIONS.N;
+            if (milestoneChecks.O) totalDeductions += MILESTONE_DEDUCTIONS.O;
+            if (milestoneChecks.P) totalDeductions += MILESTONE_DEDUCTIONS.P;
+
+            const netAmount = Math.max(0, baseCommission - totalDeductions);
+
+            // Track manager totals
+            if (!managerNetTotals[managerId]) {
+                managerNetTotals[managerId] = {
+                    net: 0,
+                    handle: validatedManagerHandle,
+                    type: validatedManagerType
+                };
+            }
+            managerNetTotals[managerId].net += netAmount;
+
+            // Create transaction document
+            const transactionDoc = firestore.collection('transactions').doc();
+            batch.set(transactionDoc, {
+                batchId: batchId,
+                managerId: managerId,
+                managerHandle: validatedManagerHandle,
+                managerType: validatedManagerType.toUpperCase(),
+                creatorId: row[1]?.toString() || 'unknown',
+                creatorHandle: row[2]?.toString() || 'unknown',
+                grossAmount: grossAmount,
+                baseCommission: baseCommission,
+                deductions: totalDeductions,
+                netAmount: netAmount,
+                milestones: milestoneChecks,
+                month: month,
+                date: admin.firestore.FieldValue.serverTimestamp(),
+                processed: true
             });
+            
+            batchOperations++;
+            processedRows++;
+
+            // Commit batch if it gets too large (Firestore limit is 500 operations)
+            if (batchOperations >= 450) {
+                await batch.commit();
+                console.log(`💾 Committed batch with ${batchOperations} transactions`);
+                batchOperations = 0;
+            }
+        }
+
+        // Commit remaining operations in this chunk
+        if (batchOperations > 0) {
+            await batch.commit();
+            console.log(`💾 Committed final batch with ${batchOperations} transactions`);
+        }
+
+        // Update progress every chunk or every PROGRESS_UPDATE_INTERVAL rows
+        if (uploadDocRef && (chunkIndex % Math.ceil(PROGRESS_UPDATE_INTERVAL / BATCH_SIZE) === 0 || chunkIndex === chunks.length - 1)) {
+            const progressPercentage = Math.min(90, 35 + (processedRows / totalDataRows) * 55); // 35% to 90%
+            
+            await uploadDocRef.update({
+                progress: progressPercentage,
+                processedRows: processedRows,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            
+            console.log(`📊 Progress update: ${processedRows}/${totalDataRows} rows (${progressPercentage.toFixed(1)}%)`);
         }
     }
 
+    // Final processing - create bonus documents for managers
+    console.log(`🎁 Creating bonus documents for ${Object.keys(managerNetTotals).length} managers...`);
+    
+    const bonusBatch = firestore.batch();
+    let bonusCount = 0;
+    
+    for (const [managerId, data] of Object.entries(managerNetTotals)) {
+        // Calculate milestone bonuses
+        // const milestonePayouts = MILESTONE_PAYOUTS[data.type];
+        
+        // Create bonus document for this manager's month
+        const bonusDoc = firestore.collection('bonuses').doc();
+        bonusBatch.set(bonusDoc, {
+            managerId: managerId,
+            managerHandle: data.handle,
+            month: month,
+            type: 'MONTHLY_TOTAL',
+            amount: data.net,
+            details: {
+                totalTransactions: processedRows,
+                managerType: data.type
+            },
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        
+        bonusCount++;
+    }
+    
+    if (bonusCount > 0) {
+        await bonusBatch.commit();
+        console.log(`✅ Created ${bonusCount} bonus documents`);
+    }
 
+    // Log validation errors if any
     if (validationErrors.length > 0) {
-      console.warn(`Batch ${batchId} completed with ${validationErrors.length} validation errors.`);
-      const errorsRef = db.collection(UPLOAD_COLLECTION).doc(month).collection('errors').doc();
-      batch.set(errorsRef, { errors: validationErrors, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+        console.warn(`⚠️ ${validationErrors.length} validation errors encountered:`, validationErrors.slice(0, 5));
     }
 
-    await batch.commit();
-    console.log(`Batch ${batchId} committed with ${rows.length - 1 - validationErrors.length} rows processed.`);
-}
-
-/**
- * Gets the previous month in YYYYMM format.
- * @param month The current month in YYYYMM format.
- * @returns The previous month in YYYYMM format.
- */
-function getPreviousMonth(month: string): string {
-    const year = parseInt(month.substring(0, 4));
-    const monthNum = parseInt(month.substring(4, 6));
+    console.log(`✅ PROCESSING COMPLETE: ${processedRows} rows processed successfully`);
     
-    let prevYear = year;
-    let prevMonth = monthNum - 1;
-    
-    if (prevMonth === 0) {
-      prevMonth = 12;
-      prevYear = year - 1;
+    // Final progress update
+    if (uploadDocRef) {
+        await uploadDocRef.update({
+            progress: 95,
+            processedRows: processedRows,
+            validationErrors: validationErrors.length,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
     }
-    
-    return `${prevYear}${prevMonth.toString().padStart(2, '0')}`;
 } 

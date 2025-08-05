@@ -1,59 +1,122 @@
-import { Router, Request, Response } from "express";
-import * as admin from "firebase-admin";
+import { Router } from "express";
 import { AuthenticatedRequest } from "../middleware/auth";
+import { Response } from "express";
+import * as admin from "firebase-admin";
 
 const adminPayoutsRouter = Router();
 
-adminPayoutsRouter.get('/payouts', async (req: Request, res: Response) => {
+// Alle Admin-Routen benötigen Admin-Berechtigung
+adminPayoutsRouter.use((req: AuthenticatedRequest, res: Response, next) => {
+    if (!req.user || req.user.role !== 'ADMIN') {
+        return res.status(403).json({ error: "Admin role required" });
+    }
+    return next();
+});
+
+// Get all pending payouts
+adminPayoutsRouter.get("/payouts/pending", async (req: AuthenticatedRequest, res: Response) => {
     try {
         const db = admin.firestore();
-        const statusFilter = req.query.status as string | undefined;
+        const snapshot = await db.collection("payouts")
+            .where("status", "==", "PENDING")
+            .orderBy("requestedAt", "desc")
+            .get();
+        
+        const payouts = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        }));
 
-        let query: admin.firestore.Query = db.collection("payoutRequests").orderBy("submittedAt", "desc");
-
-        if (statusFilter && ["SUBMITTED", "APPROVED", "IN_PROGRESS", "PAID", "REJECTED"].includes(statusFilter)) {
-            query = query.where("status", "==", statusFilter);
-        }
-
-        const snapshot = await query.limit(100).get();
-        const payouts = snapshot.docs.map(doc => doc.data());
-        res.status(200).json(payouts);
+        res.status(200).json({ data: payouts });
     } catch (error) {
-        console.error("💥 Error fetching payout requests:", error);
-        res.status(500).json({ error: "Failed to fetch payout requests." });
+        console.error("💥 Error fetching pending payouts:", error);
+        res.status(500).json({ error: "Failed to fetch pending payouts" });
     }
 });
 
-adminPayoutsRouter.put('/payouts/:id/status', async (req: AuthenticatedRequest, res: Response) => {
+// Approve/Reject payout
+adminPayoutsRouter.put("/payouts/:payoutId/status", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-        const { id } = req.params;
+        const { payoutId } = req.params;
         const { status, adminNotes } = req.body;
-        const { uid } = req.user!;
 
-        if (!status || !["APPROVED", "IN_PROGRESS", "PAID", "REJECTED"].includes(status)) {
-            return res.status(400).json({ error: "Invalid or missing 'status' field." });
+        if (!["APPROVED", "REJECTED"].includes(status)) {
+            res.status(400).json({ error: "Invalid status. Must be APPROVED or REJECTED" });
+            return;
         }
 
         const db = admin.firestore();
-        const payoutRef = db.collection("payoutRequests").doc(id);
+        const payoutRef = db.collection("payouts").doc(payoutId);
+        
+        const updateData: any = {
+            status,
+            processedAt: admin.firestore.FieldValue.serverTimestamp(),
+            processedBy: req.user!.uid
+        };
 
-        await payoutRef.update({
-            status: status,
-            adminNotes: adminNotes || "",
-            history: admin.firestore.FieldValue.arrayUnion({
-                status: status,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                actor: "ADMIN",
-                userId: uid,
-                notes: adminNotes || ""
-            })
+        if (adminNotes) {
+            updateData.adminNotes = adminNotes;
+        }
+
+        await payoutRef.update(updateData);
+
+        console.log(`✅ Payout ${payoutId} ${status.toLowerCase()} by admin ${req.user!.uid}`);
+        
+        res.status(200).json({
+            success: true,
+            message: `Payout ${status.toLowerCase()} successfully`
         });
 
-        return res.status(200).json({ success: true, message: `Payout status updated to ${status}.` });
-
     } catch (error) {
-        console.error(`💥 Error updating payout status for ${req.params.id}:`, error);
-        return res.status(500).json({ error: "Failed to update payout status." });
+        console.error(`💥 Error updating payout status:`, error);
+        res.status(500).json({ error: "Failed to update payout status" });
+    }
+});
+
+// Get payout statistics
+adminPayoutsRouter.get("/payouts/stats", async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const db = admin.firestore();
+        
+        // Get counts for each status
+        const [pendingSnapshot, approvedSnapshot, rejectedSnapshot] = await Promise.all([
+            db.collection("payouts").where("status", "==", "PENDING").get(),
+            db.collection("payouts").where("status", "==", "APPROVED").get(),
+            db.collection("payouts").where("status", "==", "REJECTED").get()
+        ]);
+
+        // Calculate total amounts
+        let totalPending = 0;
+        let totalApproved = 0;
+        
+        pendingSnapshot.docs.forEach(doc => {
+            const data = doc.data();
+            totalPending += data.amount || 0;
+        });
+
+        approvedSnapshot.docs.forEach(doc => {
+            const data = doc.data();
+            totalApproved += data.amount || 0;
+        });
+
+        const stats = {
+            counts: {
+                pending: pendingSnapshot.size,
+                approved: approvedSnapshot.size,
+                rejected: rejectedSnapshot.size,
+                total: pendingSnapshot.size + approvedSnapshot.size + rejectedSnapshot.size
+            },
+            amounts: {
+                totalPending: Math.round(totalPending * 100) / 100,
+                totalApproved: Math.round(totalApproved * 100) / 100,
+                currency: "EUR"
+            }
+        };
+
+        res.status(200).json(stats);
+    } catch (error) {
+        console.error("💥 Error fetching payout stats:", error);
+        res.status(500).json({ error: "Failed to fetch payout statistics" });
     }
 });
 

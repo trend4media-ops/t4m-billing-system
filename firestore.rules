@@ -15,9 +15,22 @@ service cloud.firestore {
     match /managers/{managerId} {
       allow read: if request.auth != null;
       allow write: if request.auth != null && (
-        request.auth.token.role == 'admin' ||  // Admin darf alles
+        request.auth.token.role == 'ADMIN' ||  // Uppercase Admin Check
+        request.auth.token.role == 'admin' ||  // Fallback lowercase
         (request.auth.token.role == 'manager' && request.auth.token.managerId == managerId) // Manager nur eigenes
       );
+    }
+
+    ////////////////////////////////////////////////////////
+    //  MANAGER EARNINGS – Admin read, Functions write
+    ////////////////////////////////////////////////////////
+    match /manager-earnings/{earningsId} {
+      allow read: if request.auth != null && (
+        request.auth.token.role == 'ADMIN' ||
+        request.auth.token.role == 'admin' ||
+        request.auth.token.managerId == resource.data.managerId
+      );
+      allow write: if false; // Cloud Functions only
     }
 
     ////////////////////////////////////////////////////////
@@ -25,6 +38,7 @@ service cloud.firestore {
     ////////////////////////////////////////////////////////
     match /transactions/{txId} {
       allow read: if request.auth != null && (
+        request.auth.token.role == 'ADMIN' ||
         request.auth.token.role == 'admin' ||
         request.auth.token.managerId == resource.data.managerId
       );
@@ -36,6 +50,7 @@ service cloud.firestore {
     ////////////////////////////////////////////////////////
     match /bonuses/{bonusId} {
       allow read: if request.auth != null && (
+        request.auth.token.role == 'ADMIN' ||
         request.auth.token.role == 'admin' ||
         request.auth.token.managerId == resource.data.managerId
       );
@@ -43,10 +58,14 @@ service cloud.firestore {
     }
 
     ////////////////////////////////////////////////////////
-    //  UPLOAD BATCHES – nur Admin lesend & schreibend
+    //  UPLOAD BATCHES – Admin mit erweiterten Berechtigungen
     ////////////////////////////////////////////////////////
     match /uploadBatches/{batchId} {
-      allow read, write: if request.auth != null && request.auth.token.role == 'admin';
+      allow read, write: if request.auth != null && (
+        request.auth.token.role == 'ADMIN' ||
+        request.auth.token.role == 'admin' ||
+        request.auth.uid in ['admin-user-001', 'admin_user_001'] // Fallback für Admin UIDs
+      );
     }
 
     ////////////////////////////////////////////////////////
@@ -55,9 +74,14 @@ service cloud.firestore {
     match /payoutRequests/{reqId} {
       allow create: if request.auth != null && request.auth.token.role == 'manager' && request.resource.data.managerId == request.auth.token.managerId;
       allow read: if request.auth != null && (
-        request.auth.token.role == 'admin' || request.auth.token.managerId == resource.data.managerId
+        request.auth.token.role == 'ADMIN' || 
+        request.auth.token.role == 'admin' || 
+        request.auth.token.managerId == resource.data.managerId
       );
-      allow update, delete: if request.auth != null && request.auth.token.role == 'admin';
+      allow update, delete: if request.auth != null && (
+        request.auth.token.role == 'ADMIN' || 
+        request.auth.token.role == 'admin'
+      );
     }
 
     ////////////////////////////////////////////////////////
@@ -66,14 +90,20 @@ service cloud.firestore {
     match /messages/{msgId} {
       allow read, update: if request.auth != null && request.auth.uid == resource.data.userId;
       allow create: if request.auth != null; // Admin SDK oder Funktionen
-      allow delete: if request.auth != null && request.auth.token.role == 'admin';
+      allow delete: if request.auth != null && (
+        request.auth.token.role == 'ADMIN' ||
+        request.auth.token.role == 'admin'
+      );
     }
 
     ////////////////////////////////////////////////////////
     //  AUDIT LOGS – read-only für Admin
     ////////////////////////////////////////////////////////
     match /auditLogs/{logId} {
-      allow read: if request.auth != null && request.auth.token.role == 'admin';
+      allow read: if request.auth != null && (
+        request.auth.token.role == 'ADMIN' ||
+        request.auth.token.role == 'admin'
+      );
       allow write: if false;
     }
   }

@@ -1,0 +1,150 @@
+{
+  "managers": {
+    "demo_mgr_1": {
+      "name": "Alice Schmidt",
+      "email": "alice@trend4media.com",
+      "type": "LIVE",
+      "handle": "alice_live",
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_2": {
+      "name": "Bob Müller", 
+      "email": "bob@trend4media.com",
+      "type": "TEAM",
+      "handle": "bob_team",
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_3": {
+      "name": "Carol Weber",
+      "email": "carol@trend4media.com", 
+      "type": "LIVE",
+      "handle": "carol_live",
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_4": {
+      "name": "David Fischer",
+      "email": "david@trend4media.com",
+      "type": "TEAM", 
+      "handle": "david_team",
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_5": {
+      "name": "Eva Bauer",
+      "email": "eva@trend4media.com",
+      "type": "LIVE",
+      "handle": "eva_live", 
+      "createdAt": "2025-01-08T10:00:00Z"
+    }
+  },
+  "manager-earnings": {
+    "demo_mgr_1_202508": {
+      "managerId": "demo_mgr_1",
+      "month": "202508",
+      "baseCommission": 1850.00,
+      "totalGross": 6166.67,
+      "totalNet": 5241.67,
+      "totalEarnings": 2450.00,
+      "transactionCount": 45,
+      "creatorCount": 18,
+      "bonuses": 600.00,
+      "status": "CALCULATED",
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_2_202508": {
+      "managerId": "demo_mgr_2", 
+      "month": "202508",
+      "baseCommission": 1200.00,
+      "totalGross": 4000.00,
+      "totalNet": 3400.00,
+      "totalEarnings": 1650.00,
+      "transactionCount": 32,
+      "creatorCount": 12,
+      "bonuses": 450.00,
+      "status": "CALCULATED",
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_3_202508": {
+      "managerId": "demo_mgr_3",
+      "month": "202508", 
+      "baseCommission": 2100.00,
+      "totalGross": 7000.00,
+      "totalNet": 5950.00,
+      "totalEarnings": 2780.00,
+      "transactionCount": 52,
+      "creatorCount": 21,
+      "bonuses": 680.00,
+      "status": "CALCULATED",
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_4_202508": {
+      "managerId": "demo_mgr_4",
+      "month": "202508",
+      "baseCommission": 950.00,
+      "totalGross": 3166.67,
+      "totalNet": 2691.67,
+      "totalEarnings": 1280.00,
+      "transactionCount": 28,
+      "creatorCount": 9,
+      "bonuses": 330.00,
+      "status": "CALCULATED",
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_5_202508": {
+      "managerId": "demo_mgr_5",
+      "month": "202508",
+      "baseCommission": 1650.00,
+      "totalGross": 5500.00,
+      "totalNet": 4675.00,
+      "totalEarnings": 2200.00,
+      "transactionCount": 38,
+      "creatorCount": 15,
+      "bonuses": 550.00,
+      "status": "CALCULATED",
+      "createdAt": "2025-01-08T10:00:00Z"
+    }
+  },
+  "bonuses": {
+    "demo_mgr_1_202508_bonus_1": {
+      "managerId": "demo_mgr_1",
+      "month": "202508",
+      "type": "MILESTONE_S",
+      "amount": 200.00,
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_1_202508_bonus_2": {
+      "managerId": "demo_mgr_1", 
+      "month": "202508",
+      "type": "DIAMOND_BONUS",
+      "amount": 400.00,
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_2_202508_bonus_1": {
+      "managerId": "demo_mgr_2",
+      "month": "202508",
+      "type": "MILESTONE_N",
+      "amount": 250.00,
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_2_202508_bonus_2": {
+      "managerId": "demo_mgr_2",
+      "month": "202508", 
+      "type": "RECRUITMENT_BONUS",
+      "amount": 200.00,
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_3_202508_bonus_1": {
+      "managerId": "demo_mgr_3",
+      "month": "202508",
+      "type": "MILESTONE_S",
+      "amount": 300.00,
+      "createdAt": "2025-01-08T10:00:00Z"
+    },
+    "demo_mgr_3_202508_bonus_2": {
+      "managerId": "demo_mgr_3",
+      "month": "202508",
+      "type": "DIAMOND_BONUS", 
+      "amount": 380.00,
+      "createdAt": "2025-01-08T10:00:00Z"
+    }
+  }
+} 

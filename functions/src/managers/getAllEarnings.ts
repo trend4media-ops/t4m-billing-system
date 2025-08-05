@@ -24,6 +24,17 @@ export const getAllManagerEarnings = async (req: AuthenticatedRequest, res: Resp
         
         const earningsByManager: any[] = [];
         
+        // Add a summary object
+        const summary = {
+            totalGross: 0,
+            totalCommissions: 0,
+            totalBonuses: 0,
+            totalDownlineIncome: 0,
+            totalEarnings: 0,
+            activeManagers: 0,
+            totalCreators: 0,
+        };
+
         // Get managers collection to get manager details
         const managersSnapshot = await db.collection("managers").get();
         const managersMap = new Map<string, any>();
@@ -38,6 +49,8 @@ export const getAllManagerEarnings = async (req: AuthenticatedRequest, res: Resp
             const manager = managersMap.get(managerId);
             
             if (!manager) continue;
+
+            summary.activeManagers++;
             
             // Get bonus breakdown for this manager and month
             const bonusesSnapshot = await db.collection("bonuses")
@@ -53,58 +66,90 @@ export const getAllManagerEarnings = async (req: AuthenticatedRequest, res: Resp
                 downlineIncome: { levelA: 0, levelB: 0, levelC: 0 },
             };
             
-            bonusesSnapshot.forEach(doc => {
-                const bonus = doc.data();
+            bonusesSnapshot.forEach(bonusDoc => {
+                const bonus = bonusDoc.data();
+                const amount = bonus.amount || 0;
+                
                 switch (bonus.type) {
                     case "MILESTONE_S":
-                        bonusBreakdown.milestoneBonuses.S += bonus.amount;
+                        bonusBreakdown.milestoneBonuses.S += amount;
                         break;
                     case "MILESTONE_N":
-                        bonusBreakdown.milestoneBonuses.N += bonus.amount;
+                        bonusBreakdown.milestoneBonuses.N += amount;
                         break;
                     case "MILESTONE_O":
-                        bonusBreakdown.milestoneBonuses.O += bonus.amount;
+                        bonusBreakdown.milestoneBonuses.O += amount;
                         break;
                     case "MILESTONE_P":
-                        bonusBreakdown.milestoneBonuses.P += bonus.amount;
+                        bonusBreakdown.milestoneBonuses.P += amount;
                         break;
                     case "GRADUATION_BONUS":
-                        bonusBreakdown.graduationBonus += bonus.amount;
+                        bonusBreakdown.graduationBonus += amount;
                         break;
                     case "DIAMOND_BONUS":
-                        bonusBreakdown.diamondBonus += bonus.amount;
+                        bonusBreakdown.diamondBonus += amount;
                         break;
                     case "RECRUITMENT_BONUS":
-                        bonusBreakdown.recruitmentBonus += bonus.amount;
+                        bonusBreakdown.recruitmentBonus += amount;
                         break;
                     case "DOWNLINE_LEVEL_A":
-                        bonusBreakdown.downlineIncome.levelA += bonus.amount;
+                        bonusBreakdown.downlineIncome.levelA += amount;
                         break;
                     case "DOWNLINE_LEVEL_B":
-                        bonusBreakdown.downlineIncome.levelB += bonus.amount;
+                        bonusBreakdown.downlineIncome.levelB += amount;
                         break;
                     case "DOWNLINE_LEVEL_C":
-                        bonusBreakdown.downlineIncome.levelC += bonus.amount;
+                        bonusBreakdown.downlineIncome.levelC += amount;
                         break;
                 }
             });
+
+            const managerTotalBonuses = 
+                Object.values(bonusBreakdown.milestoneBonuses).reduce((a: number, b: number) => a + b, 0) +
+                bonusBreakdown.graduationBonus +
+                bonusBreakdown.diamondBonus +
+                bonusBreakdown.recruitmentBonus;
+
+            const managerTotalDownline = Object.values(bonusBreakdown.downlineIncome).reduce((a: number, b: number) => a + b, 0);
+
+            // Update summary
+            summary.totalGross += earningsData.totalGross || 0;
+            summary.totalCommissions += earningsData.baseCommission || 0;
+            summary.totalBonuses += managerTotalBonuses;
+            summary.totalDownlineIncome += managerTotalDownline;
+            summary.totalEarnings += earningsData.totalEarnings || 0;
+            summary.totalCreators += earningsData.creatorCount || 0;
             
             earningsByManager.push({
                 managerId: managerId,
                 managerHandle: manager.name || manager.email,
+                managerName: manager.name || manager.handle,
+                managerType: manager.type || 'UNKNOWN',
                 month: month,
                 baseCommission: earningsData.baseCommission || 0,
+                commissionTotal: earningsData.baseCommission || 0,
                 ...bonusBreakdown,
+                bonusTotal: managerTotalBonuses,
+                downlineTotal: managerTotalDownline,
                 totalEarnings: earningsData.totalEarnings || 0,
                 totalGross: earningsData.totalGross || 0,
                 totalDeductions: earningsData.totalDeductions || 0,
                 totalNet: earningsData.totalNet || 0,
                 transactionCount: earningsData.transactionCount || 0,
-                status: earningsData.status || 'CALCULATED'
+                creatorCount: earningsData.creatorCount || 0,
+                type: manager.type || 'UNKNOWN',
+                bonusCount: bonusesSnapshot.size,
+                status: earningsData.status || 'CALCULATED',
+                downlineIncome: bonusBreakdown.downlineIncome
             });
         }
 
-        res.status(200).json(earningsByManager);
+        res.status(200).json({
+            summary,
+            managers: earningsByManager,
+            cached: false,
+            loadTime: 0
+        });
     } catch (error) {
         console.error("💥 Error fetching all manager earnings:", error);
         res.status(500).json({ error: "Failed to fetch all manager earnings." });

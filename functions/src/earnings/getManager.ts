@@ -16,7 +16,8 @@ export async function getManagerEarnings(
 ): Promise<void> {
   try {
     const { managerId } = req.params;
-    const period = (req.query.period as string) || undefined;
+    // Accept both 'month' and 'period' for compatibility
+    const period = (req.query.month as string) || (req.query.period as string) || undefined;
 
     // Access control
     if (req.user?.role === "manager" && req.user.managerId !== managerId) {

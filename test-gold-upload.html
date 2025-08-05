@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🚀 GOLD Upload System Test</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #ffd700, #ffed4e);
+            min-height: 100vh;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #d4a017;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .upload-form {
+            border: 3px dashed #ffd700;
+            border-radius: 15px;
+            padding: 30px;
+            text-align: center;
+            margin-bottom: 30px;
+            background: #fff9e6;
+        }
+        input[type="file"] {
+            margin: 20px 0;
+            padding: 10px;
+            border: 2px solid #ffd700;
+            border-radius: 8px;
+            width: 100%;
+        }
+        select, input[type="text"] {
+            margin: 10px 0;
+            padding: 12px;
+            border: 2px solid #ffd700;
+            border-radius: 8px;
+            width: 100%;
+            font-size: 16px;
+        }
+        button {
+            background: linear-gradient(45deg, #ffd700, #d4a017);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 10px;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            margin: 10px 0;
+            transition: all 0.3s ease;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(212, 160, 23, 0.3);
+        }
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 20px 0;
+            display: none;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(45deg, #ffd700, #d4a017);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .status {
+            padding: 15px;
+            border-radius: 10px;
+            margin: 15px 0;
+            font-weight: bold;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background: #cce7ff;
+            color: #004085;
+            border: 1px solid #99d3ff;
+        }
+        .results {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            border-left: 5px solid #ffd700;
+        }
+        .gold-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .stat-card {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            border: 2px solid #ffd700;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #d4a017;
+        }
+        .stat-label {
+            font-size: 14px;
+            color: #666;
+            margin-top: 5px;
+        }
+        .auth-section {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 GOLD Upload System Test</h1>
+        
+        <div class="auth-section">
+            <h3>🔐 Authentication (Required for GOLD uploads)</h3>
+            <input type="text" id="authToken" placeholder="Paste your auth token here..." />
+            <button onclick="testAuth()">Test Authentication</button>
+            <div id="authStatus"></div>
+        </div>
+
+        <div class="upload-form">
+            <h3>💰 Upload GOLD Excel Data</h3>
+            <p>Select an Excel file containing manager performance data</p>
+            
+            <input type="file" id="fileInput" accept=".xlsx,.xls" />
+            
+            <select id="monthSelect">
+                <option value="202508">August 2025</option>
+                <option value="202507">July 2025</option>
+                <option value="202506">June 2025</option>
+            </select>
+            
+            <button onclick="uploadFile()" id="uploadBtn">🚀 Upload GOLD Data</button>
+            
+            <div class="progress-bar" id="progressBar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+        </div>
+
+        <div id="statusContainer"></div>
+        <div id="resultsContainer"></div>
+    </div>
+
+    <script>
+        let authToken = '';
+        let currentBatchId = '';
+
+        // Test authentication
+        async function testAuth() {
+            const token = document.getElementById('authToken').value.trim();
+            const statusDiv = document.getElementById('authStatus');
+            
+            if (!token) {
+                showStatus('Please enter an auth token', 'error', statusDiv);
+                return;
+            }
+
+            try {
+                const response = await fetch('https://us-central1-trend4media-billing.cloudfunctions.net/api/health', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (response.ok) {
+                    authToken = token;
+                    showStatus('✅ Authentication successful!', 'success', statusDiv);
+                } else {
+                    showStatus('❌ Authentication failed', 'error', statusDiv);
+                }
+            } catch (error) {
+                showStatus('❌ Connection error: ' + error.message, 'error', statusDiv);
+            }
+        }
+
+        // Upload file
+        async function uploadFile() {
+            if (!authToken) {
+                showStatus('❌ Please authenticate first!', 'error');
+                return;
+            }
+
+            const fileInput = document.getElementById('fileInput');
+            const monthSelect = document.getElementById('monthSelect');
+            const uploadBtn = document.getElementById('uploadBtn');
+            
+            if (!fileInput.files[0]) {
+                showStatus('❌ Please select a file!', 'error');
+                return;
+            }
+
+            const file = fileInput.files[0];
+            const month = monthSelect.value;
+
+            console.log('🚀 Starting GOLD upload...', { file: file.name, month });
+
+            uploadBtn.disabled = true;
+            showProgress(0);
+            showStatus('🚀 Starting GOLD upload process...', 'info');
+
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('month', month);
+
+                const response = await fetch('https://us-central1-trend4media-billing.cloudfunctions.net/api/uploads/excel', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const result = await response.json();
+                console.log('✅ Upload response:', result);
+
+                if (result.success) {
+                    currentBatchId = result.batchId;
+                    showProgress(25);
+                    showStatus('✅ File uploaded successfully! Processing started...', 'success');
+                    
+                    // Start monitoring progress
+                    monitorProgress(result.batchId);
+                } else {
+                    throw new Error(result.error || 'Upload failed');
+                }
+
+            } catch (error) {
+                console.error('💥 Upload error:', error);
+                showStatus('💥 Upload failed: ' + error.message, 'error');
+                uploadBtn.disabled = false;
+                hideProgress();
+            }
+        }
+
+        // Monitor upload progress
+        async function monitorProgress(batchId) {
+            let attempts = 0;
+            const maxAttempts = 60; // 5 minutes max
+
+            const checkStatus = async () => {
+                try {
+                    const response = await fetch(`https://us-central1-trend4media-billing.cloudfunctions.net/api/uploads/status/${batchId}`, {
+                        headers: {
+                            'Authorization': `Bearer ${authToken}`
+                        }
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`Status check failed: ${response.status}`);
+                    }
+
+                    const data = await response.json();
+                    console.log('📊 Status update:', data);
+
+                    updateProgress(data);
+
+                    if (data.status === 'COMPLETED') {
+                        showResults(data);
+                        document.getElementById('uploadBtn').disabled = false;
+                        return;
+                    } else if (data.status === 'FAILED') {
+                        showStatus('💥 Processing failed: ' + (data.error || 'Unknown error'), 'error');
+                        document.getElementById('uploadBtn').disabled = false;
+                        hideProgress();
+                        return;
+                    }
+
+                    // Continue monitoring
+                    attempts++;
+                    if (attempts < maxAttempts) {
+                        setTimeout(checkStatus, 5000); // Check every 5 seconds
+                    } else {
+                        showStatus('⏰ Monitoring timeout - please check status manually', 'error');
+                        document.getElementById('uploadBtn').disabled = false;
+                    }
+
+                } catch (error) {
+                    console.error('Status check error:', error);
+                    attempts++;
+                    if (attempts < maxAttempts) {
+                        setTimeout(checkStatus, 5000);
+                    }
+                }
+            };
+
+            setTimeout(checkStatus, 2000); // Start checking after 2 seconds
+        }
+
+        // Update progress based on status
+        function updateProgress(data) {
+            const progress = data.progress || 0;
+            showProgress(progress);
+
+            const statusMessages = {
+                'UPLOADED': '📤 File uploaded',
+                'PROCESSING': '⚡ Processing data...',
+                'CALCULATING': '🧮 Calculating earnings...',
+                'COMPLETED': '🎉 Processing completed!'
+            };
+
+            const message = statusMessages[data.status] || `Status: ${data.status}`;
+            showStatus(message, 'info');
+        }
+
+        // Show results
+        function showResults(data) {
+            const container = document.getElementById('resultsContainer');
+            const summary = data.summary || {};
+            
+            container.innerHTML = `
+                <div class="results">
+                    <h3>🎉 GOLD Processing Results</h3>
+                    <div class="gold-stats">
+                        <div class="stat-card">
+                            <div class="stat-value">${summary.managersProcessed || 0}</div>
+                            <div class="stat-label">Managers Processed</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value">${summary.transactionsCreated || 0}</div>
+                            <div class="stat-label">Transactions Created</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value">${summary.earningsCalculated || 0}</div>
+                            <div class="stat-label">Earnings Calculated</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value">€${(summary.totalCommissions || 0).toFixed(2)}</div>
+                            <div class="stat-label">Total Commissions</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value">€${(summary.totalBonuses || 0).toFixed(2)}</div>
+                            <div class="stat-label">Total Bonuses</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value">€${(summary.totalEarnings || 0).toFixed(2)}</div>
+                            <div class="stat-label">Total Earnings</div>
+                        </div>
+                    </div>
+                    <p><strong>Batch ID:</strong> ${data.id}</p>
+                    <p><strong>File:</strong> ${data.fileName}</p>
+                    <p><strong>Month:</strong> ${data.month}</p>
+                    <button onclick="viewManagerReports()">📊 View Manager Reports</button>
+                </div>
+            `;
+
+            showStatus('🎉 GOLD data processed successfully! Data is now live.', 'success');
+            hideProgress();
+        }
+
+        // Utility functions
+        function showStatus(message, type, container = null) {
+            const statusDiv = container || document.getElementById('statusContainer');
+            statusDiv.innerHTML = `<div class="status ${type}">${message}</div>`;
+        }
+
+        function showProgress(percent) {
+            const progressBar = document.getElementById('progressBar');
+            const progressFill = document.getElementById('progressFill');
+            
+            progressBar.style.display = 'block';
+            progressFill.style.width = percent + '%';
+        }
+
+        function hideProgress() {
+            const progressBar = document.getElementById('progressBar');
+            progressBar.style.display = 'none';
+        }
+
+        function viewManagerReports() {
+            window.open('https://trend4media-billing.web.app/admin/reports/', '_blank');
+        }
+
+        // Auto-focus on auth token input
+        document.getElementById('authToken').focus();
+    </script>
+</body>
+</html> 
