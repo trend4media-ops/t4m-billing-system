@@ -1,115 +1,114 @@
-import { Request, Response } from "express";
-import * as admin from "firebase-admin";
+import * as functions from 'firebase-functions/v1';
+import * as admin from 'firebase-admin';
+import { Request, Response } from 'express';
 
-// Definitive test users with clear credentials
-const TEST_USERS = {
-  'admin@trend4media.com': {
-    password: 'admin123',
-    role: 'ADMIN', // Uppercase for consistency
-    firstName: 'Admin',
-    lastName: 'User',
-    uid: 'admin-user-001'
+interface TestUserBase {
+  password: string;
+  role: string;
+  firstName: string;
+  lastName: string;
+  uid: string;
+}
+
+interface TestUserWithManagerType extends TestUserBase {
+  managerType: string;
+}
+
+type TestUser = TestUserBase | TestUserWithManagerType;
+
+const testUsers: TestUser[] = [
+  {
+    uid: "demo-admin-001",
+    password: "admin123",
+    role: "ADMIN",
+    firstName: "Admin",
+    lastName: "User"
   },
-  'live@trend4media.com': {
-    password: 'live123', 
-    role: 'MANAGER',
-    managerType: 'LIVE',
-    firstName: 'Live',
-    lastName: 'Manager',
-    uid: 'live-manager-001'
+  {
+    uid: "demo-live-001", 
+    password: "live123",
+    role: "MANAGER",
+    managerType: "LIVE",
+    firstName: "Live",
+    lastName: "Manager"
   },
-  'team@trend4media.com': {
-    password: 'team123',
-    role: 'MANAGER',
-    managerType: 'TEAM', 
-    firstName: 'Team',
-    lastName: 'Manager',
-    uid: 'team-manager-001'
-  },
-  'test@trend4media.com': {
-    password: 'test123',
-    role: 'MANAGER',
-    firstName: 'Test',
-    lastName: 'User',
-    uid: 'test-user-001'
+  {
+    uid: "demo-team-001",
+    password: "team123", 
+    role: "MANAGER",
+    managerType: "TEAM",
+    firstName: "Team",
+    lastName: "Manager"
   }
-};
+];
 
-export async function login(req: Request, res: Response): Promise<void> {
+export const login = functions.region('europe-west1').https.onRequest(async (req: Request, res: Response) => {
+  // CORS headers
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    res.status(200).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
   try {
-    const { email, password } = req.body as { email?: string; password?: string };
+    const { email, password } = req.body;
 
     if (!email || !password) {
-      res.status(400).json({ error: "Email und Passwort sind erforderlich" });
+      res.status(400).json({ error: 'Email and password are required' });
       return;
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
-    const testUser = TEST_USERS[normalizedEmail as keyof typeof TEST_USERS];
+    // Find test user by email/uid pattern
+    const testUser = testUsers.find(user => 
+      email.includes(user.uid) || 
+      email.startsWith(user.firstName.toLowerCase()) ||
+      email === `${user.firstName.toLowerCase()}@trend4media.com`
+    );
 
     if (!testUser || testUser.password !== password) {
-      res.status(401).json({ error: "Ungültige Anmeldedaten" });
+      res.status(401).json({ error: 'Invalid credentials' });
       return;
     }
 
-    // Set comprehensive custom claims
-    const customClaims = {
+    // Create custom claims
+    const hasManagerType = 'managerType' in testUser;
+    const customClaims: any = {
       role: testUser.role,
       firstName: testUser.firstName,
       lastName: testUser.lastName,
-      ...((testUser as any).managerType && { managerType: (testUser as any).managerType }),
-      ...(testUser.role === 'MANAGER' && { managerId: testUser.uid })
+      ...(hasManagerType && { managerType: (testUser as TestUserWithManagerType).managerType }),
     };
 
-    try {
-      // First ensure user exists in Firebase Auth
-      // let userRecord;
-      try {
-        // userRecord = await admin.auth().getUser(testUser.uid);
-      } catch (error: any) {
-        if (error.code === 'auth/user-not-found') {
-          // Create user if not exists
-          // userRecord = await admin.auth().createUser({
-          //   uid: testUser.uid,
-          //   email: normalizedEmail,
-          //   password: testUser.password,
-          //   displayName: `${testUser.firstName} ${testUser.lastName}`
-          // });
-          console.log(`✅ Created missing user: ${testUser.uid}`);
-        } else {
-          throw error;
-        }
-      }
+    // Create custom token
+    const customToken = await admin.auth().createCustomToken(testUser.uid, customClaims);
 
-      // Set custom claims for the user
-      await admin.auth().setCustomUserClaims(testUser.uid, customClaims);
-      console.log(`✅ Set custom claims for ${testUser.uid}:`, customClaims);
-
-      // Create a Firebase Custom Token with additional claims
-      const customToken = await admin.auth().createCustomToken(testUser.uid, customClaims);
-
-      const response = {
+    // Response with user data
+    const response = {
+      customToken,
+      user: {
         uid: testUser.uid,
         firstName: testUser.firstName,
         lastName: testUser.lastName,
         role: testUser.role,
-        ...(('managerType' in testUser) && testUser.managerType && { managerType: (testUser as any).managerType }),
-      };
+        ...(hasManagerType && { managerType: (testUser as TestUserWithManagerType).managerType })
+      }
+    };
 
-      res.json({ 
-        customToken: customToken, 
-        user: response, 
-        message: "Login erfolgreich",
-        claims: customClaims // Debug info
-      });
-
-    } catch (authError) {
-      console.error("💥 Firebase Auth Error:", authError);
-      res.status(500).json({ error: "Authentication setup failed" });
-    }
+    res.status(200).json(response);
 
   } catch (error) {
-    console.error("💥 LOGIN ERROR:", error);
-    res.status(500).json({ error: "Interner Server-Fehler" });
+    console.error('Login error:', error);
+    res.status(500).json({ 
+      error: 'Internal server error',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
   }
-} 
+}); 

@@ -6,7 +6,6 @@ import { getManagerPerformance } from "../managers/getPerformance";
 import { getAvailableEarnings } from "../payouts/getAvailable";
 import { getManagers } from "../managers/getManagers";
 import { createUploadMetadata } from "../uploads/createMetadata";
-import { processUploadedExcel } from "../excel-calculator"; // Import the new function
 import { getAllManagerEarnings } from "../managers/getAllEarnings";
 import { getMessages, markMessageAsRead } from "../messages/getMessages";
 import { getUnreadMessagesCount } from "../messages/getUnreadCount";
@@ -23,6 +22,8 @@ import {
   deleteGenealogy,
   getTeamByManagerId
 } from "../genealogy/genealogy";
+import { processExcelFile } from "../excel-processor";
+import { BatchManager } from "../batch-management";
 
 const apiRouter = Router();
 
@@ -60,10 +61,10 @@ apiRouter.get("/health", async (req, res) => {
 // All other API routes are protected
 apiRouter.use(authMiddleware);
 
-// --- UPLOADS ---
-apiRouter.post("/uploads/metadata", createUploadMetadata); // ✅ Fixed: uploads (with s)
+// --- ENHANCED EXCEL PROCESSING ---
+apiRouter.post("/uploads/metadata", createUploadMetadata);
 
-// Route to trigger processing
+// Enhanced processing endpoint with calculation integration
 apiRouter.post("/uploads/process", async (req: AuthenticatedRequest, res: Response) => {
     const { batchId } = req.body;
 
@@ -76,19 +77,320 @@ apiRouter.post("/uploads/process", async (req: AuthenticatedRequest, res: Respon
     }
 
     try {
-        // We don't wait for the promise to resolve.
-        // The function will run in the background.
-        processUploadedExcel(batchId).catch(err => {
-            console.error(`Error processing batch ${batchId} in background:`, err);
+        console.log(`🚀 Starting enhanced Excel processing for batch: ${batchId}`);
+        
+        // Start processing in background with enhanced processor
+        processExcelFile(batchId).then(result => {
+            console.log(`✅ Enhanced processing completed for batch ${batchId}:`, result);
+        }).catch(error => {
+            console.error(`💥 Enhanced processing failed for batch ${batchId}:`, error);
         });
 
         return res.status(202).json({ 
-            message: "Processing started.",
-            batchId: batchId
+            message: "Enhanced Excel processing started with calculation integration.",
+            batchId: batchId,
+            features: [
+                "Real-time progress tracking",
+                "Automatic calculation processing", 
+                "Manager data integration",
+                "Dashboard live updates",
+                "Error handling & recovery"
+            ]
         });
     } catch (error) {
-        console.error(`Failed to start processing for batch ${batchId}:`, error);
-        return res.status(500).json({ error: "Failed to start processing." });
+        console.error(`Failed to start enhanced processing for batch ${batchId}:`, error);
+        return res.status(500).json({ error: "Failed to start enhanced processing." });
+    }
+});
+
+// --- BATCH MANAGEMENT SYSTEM ---
+
+// Get all batches with metadata
+apiRouter.get("/batches", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    if (req.user?.role !== 'ADMIN') {
+        res.status(403).json({ error: "Access Denied: Admin role required." });
+        return;
+    }
+
+    try {
+        const batches = await BatchManager.getAllBatches();
+        
+        res.status(200).json({
+            success: true,
+            batches: batches,
+            count: batches.length
+        });
+        
+    } catch (error) {
+        console.error('💥 Error fetching batches:', error);
+        res.status(500).json({ 
+            error: "Failed to fetch batch data",
+            details: error instanceof Error ? error.message : "Unknown error"
+        });
+    }
+});
+
+// Get specific batch information
+apiRouter.get("/batches/:batchId", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    if (req.user?.role !== 'ADMIN') {
+        res.status(403).json({ error: "Access Denied: Admin role required." });
+        return;
+    }
+
+    const { batchId } = req.params;
+    
+    try {
+        const batchInfo = await BatchManager.getBatchInfo(batchId);
+        
+        if (!batchInfo) {
+            res.status(404).json({ error: "Batch not found" });
+            return;
+        }
+        
+        res.status(200).json({
+            success: true,
+            batch: batchInfo
+        });
+        
+    } catch (error) {
+        console.error(`💥 Error fetching batch ${batchId}:`, error);
+        res.status(500).json({ 
+            error: "Failed to fetch batch information",
+            details: error instanceof Error ? error.message : "Unknown error"
+        });
+    }
+});
+
+// Clear specific batch data
+apiRouter.delete("/batches/:batchId", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    if (req.user?.role !== 'ADMIN') {
+        res.status(403).json({ error: "Access Denied: Admin role required." });
+        return;
+    }
+
+    const { batchId } = req.params;
+    
+    try {
+        console.log(`🗑️ Admin ${req.user.firstName} ${req.user.lastName} clearing batch: ${batchId}`);
+        
+        const result = await BatchManager.clearBatchData(batchId);
+        
+        if (result.success) {
+            res.status(200).json({
+                success: true,
+                message: `Batch data cleared successfully`,
+                result: result
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                error: "Failed to clear batch data",
+                details: result.error
+            });
+        }
+        
+    } catch (error) {
+        console.error(`💥 Error clearing batch ${batchId}:`, error);
+        res.status(500).json({ 
+            error: "Failed to clear batch data",
+            details: error instanceof Error ? error.message : "Unknown error"
+        });
+    }
+});
+
+// Clear all data for a specific month
+apiRouter.delete("/months/:month", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    if (req.user?.role !== 'ADMIN') {
+        res.status(403).json({ error: "Access Denied: Admin role required." });
+        return;
+    }
+
+    const { month } = req.params;
+    
+    try {
+        console.log(`🗑️ Admin ${req.user.firstName} ${req.user.lastName} clearing month: ${month}`);
+        
+        const results = await BatchManager.clearMonthData(month);
+        
+        const successCount = results.filter(r => r.success).length;
+        const totalDocuments = results.reduce((sum, r) => sum + r.documentsDeleted, 0);
+        
+        res.status(200).json({
+            success: true,
+            message: `Month data cleared successfully`,
+            results: {
+                batchesProcessed: results.length,
+                successfulClears: successCount,
+                totalDocumentsDeleted: totalDocuments,
+                details: results
+            }
+        });
+        
+    } catch (error) {
+        console.error(`💥 Error clearing month ${month}:`, error);
+        res.status(500).json({ 
+            error: "Failed to clear month data",
+            details: error instanceof Error ? error.message : "Unknown error"
+        });
+    }
+});
+
+// Get duplicate transactions report
+apiRouter.get("/duplicates", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    if (req.user?.role !== 'ADMIN') {
+        res.status(403).json({ error: "Access Denied: Admin role required." });
+        return;
+    }
+    
+    try {
+        const report = await BatchManager.getDuplicatesReport();
+        
+        res.status(200).json({
+            success: true,
+            report: report,
+            hasIssues: report.summary.duplicateGroups > 0
+        });
+        
+    } catch (error) {
+        console.error('💥 Error generating duplicates report:', error);
+        res.status(500).json({ 
+            error: "Failed to generate duplicates report",
+            details: error instanceof Error ? error.message : "Unknown error"
+        });
+    }
+});
+
+// Get processed manager data for dashboard
+apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    if (req.user?.role !== 'ADMIN') {
+        res.status(403).json({ error: "Access Denied: Admin role required." });
+        return;
+    }
+
+    const { month } = req.params;
+    
+    try {
+        const db = admin.firestore();
+        
+        // Get processed manager data
+        const managersSnapshot = await db.collection('processed-managers')
+            .where('month', '==', month)
+            .get();
+        
+        const managers = managersSnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        }));
+        
+        // Get month summary
+        const summaryDoc = await db.collection('month-summaries').doc(month).get();
+        const summary = summaryDoc.exists ? summaryDoc.data() : {
+            totalManagers: 0,
+            totalRevenue: 0,
+            totalCommissions: 0,
+            totalBonuses: 0
+        };
+        
+        res.status(200).json({
+            success: true,
+            month: month,
+            summary: summary,
+            managers: managers,
+            count: managers.length,
+            cached: false,
+            loadTime: 0
+        });
+        
+    } catch (error) {
+        console.error(`💥 Error fetching processed managers for ${month}:`, error);
+        res.status(500).json({ 
+            error: "Failed to fetch processed manager data",
+            details: error instanceof Error ? error.message : "Unknown error"
+        });
+    }
+});
+
+// Get batch processing status with detailed information
+apiRouter.get("/uploads/status/:batchId", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    if (req.user?.role !== 'ADMIN') {
+        res.status(403).json({ error: "Access Denied: Admin role required." });
+        return;
+    }
+    
+    const { batchId } = req.params;
+    
+    try {
+        const db = admin.firestore();
+        
+        // Get upload batch status
+        const batchDoc = await db.collection('uploadBatches').doc(batchId).get();
+        
+        if (!batchDoc.exists) {
+            res.status(404).json({ error: "Batch not found" });
+            return;
+        }
+        
+        const batchData = batchDoc.data()!;
+        
+        // Get related processed data if completed
+        let processedData = null;
+        if (batchData.status === 'COMPLETED') {
+            const summaryDoc = await db.collection('batch-summaries').doc(batchId).get();
+            if (summaryDoc.exists) {
+                processedData = summaryDoc.data();
+            }
+        }
+        
+        res.status(200).json({
+            id: batchDoc.id,
+            ...batchData,
+            processedData: processedData,
+            enhancedProcessing: true
+        });
+        
+    } catch (error) {
+        console.error(`💥 Error fetching enhanced batch status for ${batchId}:`, error);
+        res.status(500).json({ 
+            error: "Failed to fetch batch status",
+            details: error instanceof Error ? error.message : "Unknown error"
+        });
+    }
+});
+
+// Get real-time dashboard updates
+apiRouter.get("/dashboard/updates", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    if (req.user?.role !== 'ADMIN') {
+        res.status(403).json({ error: "Access Denied: Admin role required." });
+        return;
+    }
+    
+    try {
+        const db = admin.firestore();
+        
+        // Get recent dashboard updates
+        const updatesSnapshot = await db.collection('dashboard-updates')
+            .orderBy('timestamp', 'desc')
+            .limit(10)
+            .get();
+        
+        const updates = updatesSnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data(),
+            timestamp: doc.data().timestamp?.toDate()?.toISOString()
+        }));
+        
+        res.status(200).json({
+            success: true,
+            updates: updates,
+            count: updates.length
+        });
+        
+    } catch (error) {
+        console.error(`💥 Error fetching dashboard updates:`, error);
+        res.status(500).json({ 
+            error: "Failed to fetch dashboard updates",
+            details: error instanceof Error ? error.message : "Unknown error"
+        });
     }
 });
 
