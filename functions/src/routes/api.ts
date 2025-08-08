@@ -1243,6 +1243,69 @@ apiRouter.get('/bonuses/overview', async (req: AuthenticatedRequest, res: Respon
   }
 });
 
+// Remove a specific extra bonus and resync earnings
+apiRouter.delete('/bonuses/:managerId/:month/:type', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: 'Admin role required' });
+    return;
+  }
+  try {
+    const db = admin.firestore();
+    const { managerId, month, type } = req.params as { managerId: string; month: string; type: string };
+    if (!/^\d{6}$/.test(month)) {
+      res.status(400).json({ error: 'Invalid month format; expected YYYYMM' });
+      return;
+    }
+    const t = String(type || '').toUpperCase();
+    const bonusId = `${managerId}_${month}_${t}`;
+    const bonusRef = db.collection('bonuses').doc(bonusId);
+    const bonusDoc = await bonusRef.get();
+    if (!bonusDoc.exists) {
+      res.status(404).json({ error: 'Bonus not found' });
+      return;
+    }
+    const bonusAmount = bonusDoc.data()?.amount || 0;
+
+    // Delete bonus
+    await bonusRef.delete();
+
+    // Recompute extras sum from remaining bonuses for that manager+month and update earnings
+    const remainingSnap = await db.collection('bonuses')
+      .where('managerId','==', managerId)
+      .where('month','==', month)
+      .get();
+    let newExtras = 0;
+    remainingSnap.forEach(d => { newExtras += d.data().amount || 0; });
+
+    const earningsRef = db.collection('manager-earnings').doc(`${managerId}_${month}`);
+    await db.runTransaction(async (tx) => {
+      const e = await tx.get(earningsRef);
+      const base = e.exists ? (e.data()?.baseCommission || 0) : 0;
+      const milestones = e.exists ? (e.data()?.milestonePayouts || 0) : 0;
+      const newTotal = Math.round((base + milestones + newExtras) * 100) / 100;
+      tx.set(earningsRef, { extras: newExtras, totalEarnings: newTotal, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    });
+
+    // Optional: push a dashboard update event (lightweight)
+    try {
+      await db.collection('dashboard-updates').add({
+        type: 'BONUS_REMOVED',
+        managerId,
+        month,
+        bonusType: t,
+        amount: bonusAmount,
+        updatedExtras: newExtras,
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } catch {}
+
+    res.json({ success: true, managerId, month, type: t, removedAmount: bonusAmount, extras: newExtras });
+  } catch (e:any) {
+    console.error('💥 delete bonus failed', e);
+    res.status(500).json({ error: 'Failed to delete bonus', details: e.message });
+  }
+});
+
 // Diamond eligibility endpoint for UI indicators
 apiRouter.get('/bonuses/eligibility/:managerId', async (req: AuthenticatedRequest, res: Response) => {
   if (req.user?.role !== 'ADMIN') {
