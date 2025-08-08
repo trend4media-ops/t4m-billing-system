@@ -22,6 +22,7 @@ export async function getMessages(req: AuthenticatedRequest, res: Response): Pro
       return;
     }
 
+    // Support both `userId` = uid or managerId
     const messagesSnapshot = await db
       .collection("messages")
       .where("userId", "==", targetUserId)
@@ -69,10 +70,11 @@ export async function markMessageAsRead(req: AuthenticatedRequest, res: Response
     // Update the message to mark as read
     await db.collection("messages").doc(messageId).update({
       read: true,
+      isRead: true,
       readAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    res.json({ success: true, message: "Message marked as read" });
+    res.json({ success: true, id: messageId, read: true });
   } catch (error) {
     console.error("Error marking message as read:", error);
     res.status(500).json({ error: "Failed to mark message as read" });

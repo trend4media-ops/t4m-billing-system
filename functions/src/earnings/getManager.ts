@@ -97,7 +97,7 @@ export async function getManagerEarnings(
       bonusQuery = bonusQuery.where("month", "==", period);
     }
     const bonusSnap = await bonusQuery.get();
-    const milestoneBonuses = {
+    const milestoneInternal = {
       halfMilestone: 0, // S
       milestone1: 0,    // N
       milestone2: 0,    // O
@@ -121,16 +121,16 @@ export async function getManagerEarnings(
           baseCommission += amount;
           break;
         case "MILESTONE_S":
-          milestoneBonuses.halfMilestone += amount;
+          milestoneInternal.halfMilestone += amount;
           break;
         case "MILESTONE_N":
-          milestoneBonuses.milestone1 += amount;
+          milestoneInternal.milestone1 += amount;
           break;
         case "MILESTONE_O":
-          milestoneBonuses.milestone2 += amount;
+          milestoneInternal.milestone2 += amount;
           break;
         case "MILESTONE_P":
-          milestoneBonuses.retention += amount;
+          milestoneInternal.retention += amount;
           break;
         case "GRADUATION_BONUS":
           graduationBonus += amount;
@@ -153,11 +153,19 @@ export async function getManagerEarnings(
       }
     });
 
+    // Align milestone bonuses with frontend schema { S, N, O, P }
+    const milestoneBonuses = {
+      S: milestoneInternal.halfMilestone,
+      N: milestoneInternal.milestone1,
+      O: milestoneInternal.milestone2,
+      P: milestoneInternal.retention,
+    };
+
     const totalBonus = 
-      milestoneBonuses.halfMilestone + 
-      milestoneBonuses.milestone1 + 
-      milestoneBonuses.milestone2 + 
-      milestoneBonuses.retention + 
+      milestoneBonuses.S + 
+      milestoneBonuses.N + 
+      milestoneBonuses.O + 
+      milestoneBonuses.P + 
       graduationBonus + 
       diamondBonus + 
       recruitmentBonus +
@@ -174,7 +182,8 @@ export async function getManagerEarnings(
       managerHandle: manager.handle,
       managerName: manager.name,
       managerType: manager.type,
-      period,
+      month: period, // include canonical field expected by frontend
+      period,        // keep legacy for compatibility
       grossAmount: gross,
       bonusSum,
       netAmount: net,

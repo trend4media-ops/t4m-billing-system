@@ -14,7 +14,7 @@ export const getUnreadMessagesCount = async (req: AuthenticatedRequest, res: Res
         const db = admin.firestore();
         const unreadMessagesSnapshot = await db.collection("messages")
             .where("userId", "==", uid)
-            .where("read", "==", false)
+            .where("isRead", "==", false)
             .get();
         
         res.status(200).json({ count: unreadMessagesSnapshot.size });

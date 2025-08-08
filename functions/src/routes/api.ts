@@ -10,6 +10,7 @@ import { createUploadMetadata } from "../uploads/createMetadata";
 import { processUploadedExcel } from "../excel-calculator"; // Import the new function
 import { getAllManagerEarnings } from "../managers/getAllEarnings";
 import { getMessages, markMessageAsRead } from "../messages/getMessages";
+import { createMessage } from "../messages/createMessage";
 import { getUnreadMessagesCount } from "../messages/getUnreadCount";
 import { getUploadBatchStatus } from "../uploads/getUploadStatus";
 import { adminPayoutsRouter } from "./admin";
@@ -26,6 +27,7 @@ import {
   getDownlineCompensation
 } from "../genealogy/genealogy";
 import { CommissionConfigService } from "../services/commissionConfig";
+import { getMonthlyFxRate } from "../fx/getMonthlyRate";
 
 const apiRouter = Router();
 
@@ -62,6 +64,9 @@ apiRouter.get("/health", async (req, res) => {
 
 // All other API routes are protected
 apiRouter.use(authMiddleware);
+
+// --- FX RATES ---
+apiRouter.get('/fx/monthly', getMonthlyFxRate);
 
 // --- UPLOADS ---
 apiRouter.post("/uploads/metadata", createUploadMetadata); // ✅ Fixed: uploads (with s)
@@ -902,7 +907,8 @@ apiRouter.get("/genealogy/compensation", getDownlineCompensation);
 
 // --- MESSAGES ---
 apiRouter.get("/messages/unread-count", authMiddleware, getUnreadMessagesCount); // Get unread count first
-apiRouter.get("/messages/:userId", authMiddleware, getMessages); // Get messages for specific user
+apiRouter.post("/messages", authMiddleware, createMessage); // Create/send message
+apiRouter.get("/messages/:userId", authMiddleware, getMessages); // Get messages for specific user (admin allowed)
 apiRouter.put("/messages/:messageId/read", authMiddleware, markMessageAsRead); // Mark message as read
 apiRouter.get("/messages", authMiddleware, getMessages); // Get all messages for authenticated user (must be last)
 
