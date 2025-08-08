@@ -20,7 +20,7 @@ export async function getAvailableEarnings(
 ): Promise<void> {
   try {
     const { period } = req.query;
-    const managerId = req.user?.managerId || req.user?.id;
+    const managerId = req.user?.managerId || req.user?.uid;
     
     if (!managerId) {
       res.status(400).json({ error: 'Manager ID not found' });

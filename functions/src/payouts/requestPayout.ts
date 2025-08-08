@@ -4,8 +4,9 @@ import { AuthenticatedRequest } from "../middleware/auth";
 
 interface PayoutRequestBody {
   period: string;
-  requestedAmount: number;
-  bankDetails: string;
+  requestedAmount?: number;
+  amount?: number;
+  bankDetails?: string;
   notes?: string;
 }
 
@@ -14,76 +15,72 @@ export async function requestPayout(
   res: Response
 ): Promise<void> {
   try {
-    if (req.user?.role !== "MANAGER") {
+    if (!req.user || (req.user.role !== "MANAGER" && req.user.role !== "manager")) {
       res.status(403).json({ error: "Access denied. Manager role required." });
       return;
     }
     
     const { managerId, uid, email, firstName, lastName } = req.user;
     if (!managerId) {
-        res.status(400).json({ error: "Manager ID is missing from user token." });
-        return;
-    }
-
-    const { period, requestedAmount, bankDetails, notes } = req.body as PayoutRequestBody;
-
-    if (!period || !requestedAmount || !bankDetails) {
-      res.status(400).json({ error: "Missing required fields: period, requestedAmount, bankDetails." });
+      res.status(400).json({ error: "Manager ID is missing from user token." });
       return;
     }
-    
-    if (requestedAmount <= 0) {
-      res.status(400).json({ error: "Requested amount must be positive." });
+
+    const { period, requestedAmount, amount, bankDetails, notes } = req.body as PayoutRequestBody;
+
+    if (!period) {
+      res.status(400).json({ error: "Missing required field: period" });
+      return;
+    }
+
+    const requested = typeof amount === 'number' ? amount : requestedAmount;
+    if (!requested || requested <= 0) {
+      res.status(400).json({ error: "Requested amount must be a positive number." });
       return;
     }
 
     const db = admin.firestore();
 
-    // 1. Calculate the total available earnings for the manager for the given period
-    const bonusesSnapshot = await db.collection("bonuses")
-      .where("managerId", "==", managerId)
-      .where("month", "==", period)
-      .get();
-      
-    const availableAmount = bonusesSnapshot.docs.reduce((sum, doc) => sum + (doc.data().amount || 0), 0);
-    
-    // 2. Calculate already requested amounts for the same period
-    const existingRequestsSnapshot = await db.collection("payoutRequests")
+    // 1) Load consolidated total earnings for the month
+    const earningsDoc = await db.collection("manager-earnings").doc(`${managerId}_${period}`).get();
+    const totalEarnings = earningsDoc.exists ? (earningsDoc.data()?.totalEarnings || 0) : 0;
+
+    // 2) Sum already requested for the month (open + approved + paid)
+    const existingRequestsSnapshot = await db
+      .collection("payoutRequests")
       .where("managerId", "==", managerId)
       .where("period", "==", period)
-      .where("status", "in", ["SUBMITTED", "APPROVED", "IN_PROGRESS"])
+      .where("status", "in", ["SUBMITTED", "APPROVED", "IN_PROGRESS", "PAID"]) // exclude REJECTED
       .get();
-      
-    const alreadyRequestedAmount = existingRequestsSnapshot.docs.reduce((sum, doc) => sum + (doc.data().requestedAmount || 0), 0);
 
-    const netAvailableAmount = availableAmount - alreadyRequestedAmount;
+    const alreadyRequested = existingRequestsSnapshot.docs.reduce((sum, d) => sum + (d.data().amount || d.data().requestedAmount || 0), 0);
 
-    // 3. Validate if the requested amount is available
-    if (requestedAmount > netAvailableAmount) {
+    const netAvailable = Math.max(0, totalEarnings - alreadyRequested);
+    if (requested > netAvailable) {
       res.status(400).json({ 
         error: "Requested amount exceeds available balance.",
-        availableAmount,
-        alreadyRequestedAmount,
-        netAvailableAmount,
-        requestedAmount
+        totalEarnings,
+        alreadyRequested,
+        netAvailable,
+        requested
       });
       return;
     }
 
-    // 4. Create the new payout request document
+    // 3) Create payout request in payoutRequests collection
     const ref = db.collection("payoutRequests").doc();
     const newPayoutRequest = {
       id: ref.id,
       managerId,
-      managerName: `${firstName} ${lastName}`.trim() || email,
+      managerName: `${firstName || ''} ${lastName || ''}`.trim() || email || managerId,
       userId: uid,
       period,
-      requestedAmount,
-      availableOnRequest: availableAmount,
+      amount: requested,
+      availableOnRequest: totalEarnings,
       status: "SUBMITTED",
-      bankDetails,
+      bankDetails: bankDetails || "",
       notes: notes || "",
-      submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+      requestedAt: admin.firestore.FieldValue.serverTimestamp(),
       history: [
         {
           status: "SUBMITTED",
@@ -92,11 +89,11 @@ export async function requestPayout(
           userId: uid,
         }
       ]
-    };
+    } as any;
 
     await ref.set(newPayoutRequest);
 
-    res.status(201).json(newPayoutRequest);
+    res.status(201).json({ success: true, request: newPayoutRequest });
     
   } catch (error) {
     console.error("💥 Error in requestPayout:", error);

@@ -14,11 +14,15 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
+// Primary mount under /api
 app.use("/api", apiRouter);
+// Backward-compatible mount for clients that still call without /api
+app.use("/", apiRouter);
 
 export const api = onRequest({ region: "europe-west1" }, app);
 
 // Export triggers
 export { onPayoutStatusChange } from "./payouts/statusTrigger";
 // export { excelCalculator } from "./excel-calculator"; // DEPRECATED
-export { calculateDownlineCommissions } from "./downline-calculator"; 
+export { calculateDownlineCommissions, calculateDownlineForPeriodHttp } from "./downline-calculator";
+export { onUploadBatchQueued } from "./uploads/queueTrigger"; 

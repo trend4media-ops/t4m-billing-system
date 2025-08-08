@@ -2,6 +2,7 @@ import { Router } from "express";
 import { AuthenticatedRequest } from "../middleware/auth";
 import { Response } from "express";
 import * as admin from "firebase-admin";
+import { calculateDownlineForPeriod } from "../downline-calculator";
 
 const adminPayoutsRouter = Router();
 
@@ -11,6 +12,18 @@ adminPayoutsRouter.use((req: AuthenticatedRequest, res: Response, next) => {
         return res.status(403).json({ error: "Admin role required" });
     }
     return next();
+});
+
+adminPayoutsRouter.get('/recalc-downline', async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const period = (req.query.period as string) || undefined;
+        const now = new Date();
+        const fallback = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}`;
+        await calculateDownlineForPeriod(period || fallback);
+        res.status(200).json({ success: true, period: period || fallback });
+    } catch (e:any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
 // Get all pending payouts

@@ -11,13 +11,13 @@ export async function getMessages(req: AuthenticatedRequest, res: Response): Pro
 
     const db = admin.firestore();
     const { userId } = req.params;
-    
+
     // If userId is provided in params, use it (for specific user messages)
-    // Otherwise use the authenticated user's ID
-    const targetUserId = userId || req.user.id;
-    
+    // Otherwise use the authenticated user's UID
+    const targetUserId = userId || req.user.uid;
+
     // Access control: users can only access their own messages, admins can access any
-    if (req.user.role !== 'ADMIN' && req.user.id !== targetUserId) {
+    if (req.user.role !== 'ADMIN' && req.user.uid !== targetUserId) {
       res.status(403).json({ error: "Forbidden" });
       return;
     }
@@ -33,7 +33,7 @@ export async function getMessages(req: AuthenticatedRequest, res: Response): Pro
       ...doc.data()
     }));
 
-    res.json(messages);
+    res.status(200).json(messages);
   } catch (error) {
     console.error("Error fetching messages:", error);
     res.status(500).json({ error: "Failed to fetch messages" });
@@ -68,7 +68,7 @@ export async function markMessageAsRead(req: AuthenticatedRequest, res: Response
 
     // Update the message to mark as read
     await db.collection("messages").doc(messageId).update({
-      isRead: true,
+      read: true,
       readAt: admin.firestore.FieldValue.serverTimestamp()
     });
 

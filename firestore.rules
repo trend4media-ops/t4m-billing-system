@@ -69,6 +69,23 @@ service cloud.firestore {
     }
 
     ////////////////////////////////////////////////////////
+    //  DASHBOARD UPDATES & BATCH SUMMARIES – read-only for Admins
+    ////////////////////////////////////////////////////////
+    match /dashboard-updates/{updateId} {
+      allow read: if request.auth != null && (
+        request.auth.token.role == 'ADMIN' || request.auth.token.role == 'admin'
+      );
+      allow write: if false;
+    }
+
+    match /batch-summaries/{batchId} {
+      allow read: if request.auth != null && (
+        request.auth.token.role == 'ADMIN' || request.auth.token.role == 'admin'
+      );
+      allow write: if false; // written by backend
+    }
+
+    ////////////////////////////////////////////////////////
     //  PAYOUT REQUESTS
     ////////////////////////////////////////////////////////
     match /payoutRequests/{reqId} {
