@@ -33,7 +33,8 @@ export async function requestPayout(
       return;
     }
 
-    const requested = typeof amount === 'number' ? amount : requestedAmount;
+    const raw = typeof amount === 'number' ? amount : requestedAmount;
+    const requested = raw ? Math.round(raw * 100) / 100 : 0;
     if (!requested || requested <= 0) {
       res.status(400).json({ error: "Requested amount must be a positive number." });
       return;
@@ -41,9 +42,15 @@ export async function requestPayout(
 
     const db = admin.firestore();
 
-    // 1) Load consolidated total earnings for the month
+    // 1) Load base + bonuses dynamically for the month
     const earningsDoc = await db.collection("manager-earnings").doc(`${managerId}_${period}`).get();
-    const totalEarnings = earningsDoc.exists ? (earningsDoc.data()?.totalEarnings || 0) : 0;
+    const baseCommission = earningsDoc.exists ? (earningsDoc.data()?.baseCommission || 0) : 0;
+    const bonusesSnap = await db.collection('bonuses')
+      .where('managerId', '==', managerId)
+      .where('month', '==', period)
+      .get();
+    const bonusesSum = bonusesSnap.docs.reduce((sum, d) => sum + (d.data().amount || 0), 0);
+    const totalEarnings = Math.round((baseCommission + bonusesSum) * 100) / 100;
 
     // 2) Sum already requested for the month (open + approved + paid)
     const existingRequestsSnapshot = await db

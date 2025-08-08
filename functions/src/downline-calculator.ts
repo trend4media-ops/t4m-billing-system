@@ -58,19 +58,19 @@ export async function calculateDownlineForPeriod(period: string): Promise<void> 
       const level = downline.level as 'A'|'B'|'C';
       if (!downlineManagerId || !level) continue;
 
-      // Aggregate netForCommission for this downline manager for the given period
+      // Aggregate Base Commission (from net) for this downline manager for the given period
       const downlineTransactions = await db.collection('transactions')
         .where('managerId', '==', downlineManagerId)
         .where('month', '==', period)
         .get();
-      let downlineNet = 0;
+      let downlineBase = 0;
       downlineTransactions.forEach(txDoc => {
-        downlineNet += (txDoc.data().netForCommission || 0);
+        downlineBase += (txDoc.data().baseCommission || 0);
       });
-      if (downlineNet <= 0) continue;
+      if (downlineBase <= 0) continue;
 
       const rate = DOWNLINE_COMMISSION_RATES[level];
-      const commission = downlineNet * rate;
+      const commission = downlineBase * rate;
 
       const bonusRef = db.collection('bonuses').doc();
       batch.set(bonusRef, {
@@ -82,6 +82,8 @@ export async function calculateDownlineForPeriod(period: string): Promise<void> 
         batchId: `downline_calc_${period}`,
         relatedManagerId: downlineManagerId,
         relatedManagerHandle: downline.liveManagerHandle,
+        baseSource: 'BASE_COMMISSION',
+        baseAmount: downlineBase,
         calculatedAt: admin.firestore.FieldValue.serverTimestamp(),
         createdBy: 'downline-calculator',
       });

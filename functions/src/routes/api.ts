@@ -22,7 +22,8 @@ import {
   createGenealogy,
   updateGenealogy,
   deleteGenealogy,
-  getTeamByManagerId
+  getTeamByManagerId,
+  getDownlineCompensation
 } from "../genealogy/genealogy";
 
 const apiRouter = Router();
@@ -475,8 +476,9 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
     
     const managers: any[] = [];
     let totalRevenue = 0;
-    let totalCommissions = 0;
-    let totalBonuses = 0; // milestone-only
+    let totalCommissions = 0; // total payout = base + milestone + extras
+    let totalBonuses = 0; // milestone payouts only
+    let totalBase = 0; // sum of base commissions
     let totalTransactions = 0;
     
     for (const doc of earningsSnapshot.docs) {
@@ -484,15 +486,41 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
       const managerDoc = await db.collection('managers').doc(data.managerId).get();
       const managerData = managerDoc.exists ? managerDoc.data() : {} as any;
 
-      // Sum milestone bonuses only (per month & manager)
-      const milestoneTypes = ['MILESTONE_S','MILESTONE_N','MILESTONE_O','MILESTONE_P'];
-      const milestoneSnap = await db.collection('bonuses')
-        .where('managerId', '==', data.managerId)
-        .where('month', '==', month)
-        .where('type', 'in', milestoneTypes)
-        .get();
-      let milestoneSum = 0;
-      milestoneSnap.docs.forEach(b => { milestoneSum += (b.data().amount || 0); });
+      const milestoneSum = data.milestonePayouts || 0;
+      const extrasSum = data.extras || 0;
+      const base = data.baseCommission || 0;
+      const total = base + milestoneSum + extrasSum;
+      
+      // Ensure creatorCount (fallback for legacy months)
+      let creatorCount = data.creatorCount || 0;
+      if (!creatorCount) {
+        try {
+          const txSnap = await db.collection('transactions')
+            .where('month','==', month)
+            .where('managerId','==', data.managerId)
+            .get();
+          const set = new Set<string>();
+          txSnap.forEach(t => { const td:any = t.data(); set.add(td.creatorId || 'unknown'); });
+          creatorCount = set.size;
+        } catch {}
+      }
+
+      // Compute extras breakdown from bonuses collection (manual awards)
+      let extrasBreakdown = { recruitment: 0, graduation: 0, diamond: 0 };
+      try {
+        const extrasSnap = await db.collection('bonuses')
+          .where('managerId','==', data.managerId)
+          .where('month','==', month)
+          .get();
+        extrasSnap.forEach((bDoc:any) => {
+          const b = bDoc.data();
+          const t = String(b.type || '').toUpperCase();
+          const amt = b.amount || 0;
+          if (t === 'RECRUITMENT_BONUS') extrasBreakdown.recruitment += amt;
+          if (t === 'GRADUATION_BONUS') extrasBreakdown.graduation += amt;
+          if (t === 'DIAMOND_BONUS') extrasBreakdown.diamond += amt;
+        });
+      } catch {}
       
       managers.push({
         managerId: data.managerId,
@@ -500,30 +528,38 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
         managerType: (managerData?.type || data.managerType || 'live').toString().toLowerCase(),
         totalGross: data.totalGross || 0,
         totalNet: data.totalNet || 0,
-        baseCommission: data.baseCommission || 0,
-        totalBonuses: milestoneSum, // milestone-only as requested
+        baseCommission: base,
+        totalBonuses: milestoneSum, // milestone payouts only (for column)
         transactionCount: data.transactionCount || 0,
-        creatorCount: data.creatorCount || 0,
+        creatorCount: creatorCount,
         downlineEarnings: data.downlineEarnings || 0,
         processingDate: data.calculatedAt ? data.calculatedAt.toDate().toISOString() : new Date().toISOString(),
         month: month,
-        batchId: data.batchId || preferredBatchId || 'unknown'
+        batchId: data.batchId || preferredBatchId || 'unknown',
+        totalEarnings: total,
+        extrasTotal: extrasSum,
+        extrasBreakdown,
       });
       
       totalRevenue += data.totalGross || 0;
-      totalCommissions += data.baseCommission || 0;
+      totalCommissions += total;
       totalBonuses += milestoneSum;
+      totalBase += base;
       totalTransactions += data.transactionCount || 0;
     }
     
+    // Safeguard: total payout must not exceed revenue (summary level)
+    const cappedCommissions = Math.min(totalCommissions, totalRevenue);
+
     const reportData = {
       success: true,
       month: month,
       summary: {
         totalManagers: managers.length,
         totalRevenue: Math.round(totalRevenue * 100) / 100,
-        totalCommissions: Math.round(totalCommissions * 100) / 100,
+        totalCommissions: Math.round(cappedCommissions * 100) / 100,
         totalBonuses: Math.round(totalBonuses * 100) / 100,
+        baseCommissions: Math.round(totalBase * 100) / 100,
         totalTransactions: totalTransactions,
         lastUpdated: new Date().toISOString()
       },
@@ -587,6 +623,76 @@ apiRouter.get("/managers/:managerId/earnings-v2", getManagerEarnings); // Add mi
 apiRouter.get("/managers/:managerId/performance", getManagerPerformance);
 apiRouter.get("/managers/:managerId/team", getTeamPerformance);
 
+// New: Creators endpoints (informational only)
+apiRouter.get('/creators/top', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = admin.firestore();
+    const month = (req.query.month as string) || (new Date().toISOString().slice(0,7).replace('-',''));
+    // Aggregate transactions by creatorId + managerId for the month
+    const snap = await db.collection('transactions').where('month','==', month).get();
+    const aggregate = new Map<string, { creatorId: string; creatorHandle: string; managerId: string; managerHandle?: string; gross: number; net: number; base: number }>();
+    for (const d of snap.docs) {
+      const t: any = d.data();
+      const key = `${t.creatorId || 'unknown'}__${t.managerId}`;
+      const current = aggregate.get(key) || { creatorId: t.creatorId || 'unknown', creatorHandle: t.creatorHandle || 'unknown', managerId: t.managerId, managerHandle: undefined, gross: 0, net: 0, base: 0 };
+      current.gross += t.grossAmount || 0;
+      current.net += t.netForCommission || 0;
+      current.base += t.baseCommission || 0;
+      aggregate.set(key, current);
+    }
+    // Resolve manager handles
+    const managerIds = Array.from(new Set(Array.from(aggregate.values()).map(v => v.managerId)));
+    const managers: Record<string, any> = {};
+    for (const mid of managerIds) {
+      const mdoc = await db.collection('managers').doc(mid).get();
+      managers[mid] = mdoc.exists ? mdoc.data() : {};
+    }
+    const items = Array.from(aggregate.values()).map(v => ({
+      creatorId: v.creatorId,
+      creatorHandle: v.creatorHandle,
+      managerId: v.managerId,
+      managerHandle: managers[v.managerId]?.handle || managers[v.managerId]?.name || v.managerId,
+      grossAmount: Math.round(v.gross * 100) / 100,
+      netAmount: Math.round(v.net * 100) / 100,
+      baseCommission: Math.round(v.base * 100) / 100,
+    }));
+    items.sort((a,b) => (b.netAmount - a.netAmount));
+    res.status(200).json({ success: true, month, count: items.length, items });
+  } catch (e:any) {
+    console.error('💥 Error loading top creators:', e);
+    res.status(500).json({ error: 'Failed to load top creators', details: e.message });
+  }
+});
+
+apiRouter.get('/managers/:managerId/creators', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { managerId } = req.params;
+    if (!req.user || (req.user.role !== 'ADMIN' && req.user.managerId !== managerId)) {
+      res.status(403).json({ error: 'Unauthorized' });
+      return;
+    }
+    const month = (req.query.month as string) || (new Date().toISOString().slice(0,7).replace('-',''));
+    const db = admin.firestore();
+    const snap = await db.collection('transactions').where('month','==', month).where('managerId','==', managerId).get();
+    const byCreator = new Map<string, { creatorId: string; creatorHandle: string; gross: number; net: number; base: number; count: number }>();
+    for (const d of snap.docs) {
+      const t: any = d.data();
+      const cid = t.creatorId || 'unknown';
+      const cur = byCreator.get(cid) || { creatorId: cid, creatorHandle: t.creatorHandle || 'unknown', gross: 0, net: 0, base: 0, count: 0 };
+      cur.gross += t.grossAmount || 0;
+      cur.net += t.netForCommission || 0;
+      cur.base += t.baseCommission || 0;
+      cur.count += 1;
+      byCreator.set(cid, cur);
+    }
+    const creators = Array.from(byCreator.values()).sort((a,b) => b.net - a.net);
+    res.status(200).json({ success: true, month, managerId, count: creators.length, creators });
+  } catch (e:any) {
+    console.error('💥 Error loading manager creators:', e);
+    res.status(500).json({ error: 'Failed to load manager creators', details: e.message });
+  }
+});
+
 // Manager Accounts CRUD (Admin only)
 apiRouter.post('/managers/accounts', async (req: AuthenticatedRequest, res: Response) => {
     if (req.user?.role !== 'ADMIN') { res.status(403).json({ error: 'Admin role required' }); return; }
@@ -628,6 +734,142 @@ apiRouter.get("/earnings/:managerId", getManagerEarnings); // Keep old route for
 apiRouter.get("/payouts/available", getAvailableEarnings);
 apiRouter.post("/payouts/request", requestPayout);
 
+// Admin: list payout requests with optional status filter
+apiRouter.get("/payouts", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: "Access Denied: Admin role required." });
+    return;
+  }
+  try {
+    const db = admin.firestore();
+    const allowed = new Set(["SUBMITTED","APPROVED","IN_PROGRESS","PAID","REJECTED"]);
+    const filter = (req.query.filter as string) || '';
+
+    let snapshot: FirebaseFirestore.QuerySnapshot;
+    if (filter && allowed.has(filter)) {
+      snapshot = await db.collection("payoutRequests").where("status","==",filter).get();
+    } else {
+      snapshot = await db.collection("payoutRequests").get();
+    }
+
+    const payouts = snapshot.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .sort((a:any,b:any) => {
+        const aTs = a.requestedAt?.toDate ? a.requestedAt.toDate().getTime() : (a.requestedAt ? Date.parse(a.requestedAt) : 0);
+        const bTs = b.requestedAt?.toDate ? b.requestedAt.toDate().getTime() : (b.requestedAt ? Date.parse(b.requestedAt) : 0);
+        return bTs - aTs;
+      })
+      .map((p:any) => ({
+        ...p,
+        requestedAt: p.requestedAt?.toDate ? p.requestedAt.toDate().toISOString() : (p.requestedAt || null)
+      }));
+
+    res.status(200).json({ data: payouts });
+  } catch (error) {
+    console.error('💥 Error listing payouts:', error);
+    res.status(500).json({ error: 'Failed to list payout requests' });
+  }
+});
+
+// Admin: update payout status
+apiRouter.put("/payouts/:id/status", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: "Access Denied: Admin role required." });
+    return;
+  }
+  try {
+    const { id } = req.params;
+    const { status, adminNotes } = req.body as { status?: string; adminNotes?: string };
+
+    const allowedStatuses = ["APPROVED","IN_PROGRESS","PAID","REJECTED"] as const;
+    if (!status || !allowedStatuses.includes(status as any)) {
+      res.status(400).json({ error: 'Invalid status. Must be one of APPROVED, IN_PROGRESS, PAID, REJECTED' });
+      return;
+    }
+
+    const db = admin.firestore();
+    const ref = db.collection('payoutRequests').doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      res.status(404).json({ error: 'Payout request not found' });
+      return;
+    }
+
+    const updateData: any = {
+      status,
+      processedAt: admin.firestore.FieldValue.serverTimestamp(),
+      decidedBy: req.user!.uid,
+    };
+    if (adminNotes) updateData.adminNotes = adminNotes;
+    updateData.history = admin.firestore.FieldValue.arrayUnion({
+      status,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      actor: 'ADMIN',
+      userId: req.user!.uid,
+      adminNotes: adminNotes || ''
+    });
+
+    await ref.update(updateData);
+
+    res.status(200).json({ success: true, message: `Payout ${status.toLowerCase()} successfully` });
+  } catch (error) {
+    console.error('💥 Error updating payout status:', error);
+    res.status(500).json({ error: 'Failed to update payout status' });
+  }
+});
+
+// Manager: payout history
+apiRouter.get("/payouts/history", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  if (!req.user || (req.user.role !== 'MANAGER' && req.user.role !== 'manager')) {
+    res.status(403).json({ error: 'Access denied. Manager role required.' });
+    return;
+  }
+  try {
+    const db = admin.firestore();
+    const managerId = req.user.managerId || req.user.uid;
+    const period = (req.query.period as string) || undefined;
+
+    let q: FirebaseFirestore.Query = db.collection('payoutRequests').where('managerId','==',managerId);
+    if (period) q = q.where('period','==',period);
+    const snapshot = await q.get();
+
+    const items = snapshot.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .sort((a:any,b:any) => {
+        const aTs = a.requestedAt?.toDate ? a.requestedAt.toDate().getTime() : (a.requestedAt ? Date.parse(a.requestedAt) : 0);
+        const bTs = b.requestedAt?.toDate ? b.requestedAt.toDate().getTime() : (b.requestedAt ? Date.parse(b.requestedAt) : 0);
+        return bTs - aTs;
+      })
+      .map((p:any) => ({
+        ...p,
+        requestedAt: p.requestedAt?.toDate ? p.requestedAt.toDate().toISOString() : (p.requestedAt || null)
+      }));
+
+    res.status(200).json({ success: true, data: items });
+  } catch (error) {
+    console.error('💥 Error fetching payout history:', error);
+    res.status(500).json({ error: 'Failed to fetch payout history' });
+  }
+});
+
+// Admin: manager-specific payouts
+apiRouter.get("/payouts/manager/:managerId", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: "Access Denied: Admin role required." });
+    return;
+  }
+  try {
+    const db = admin.firestore();
+    const { managerId } = req.params;
+    const snapshot = await db.collection('payoutRequests').where('managerId','==',managerId).get();
+    const data = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+    res.status(200).json({ data });
+  } catch (error) {
+    console.error('💥 Error fetching manager payouts:', error);
+    res.status(500).json({ error: 'Failed to fetch manager payouts' });
+  }
+});
+
 // --- GENEALOGY ---
 apiRouter.get("/genealogy", getAllGenealogy);
 apiRouter.get("/genealogy/team-handle/:teamManagerHandle", getGenealogyByTeamHandle);
@@ -635,6 +877,7 @@ apiRouter.post("/genealogy", createGenealogy);
 apiRouter.put("/genealogy/:id", updateGenealogy);
 apiRouter.delete("/genealogy/:id", deleteGenealogy);
 apiRouter.get("/genealogy/team/:teamManagerId", getTeamByManagerId);
+apiRouter.get("/genealogy/compensation", getDownlineCompensation);
 
 // --- MESSAGES ---
 apiRouter.get("/messages/unread-count", authMiddleware, getUnreadMessagesCount); // Get unread count first
@@ -805,5 +1048,178 @@ apiRouter.post('/maintenance/purge-all-excel', async (req: AuthenticatedRequest,
 
 // --- ADMIN ---
 apiRouter.use('/admin', adminPayoutsRouter);
+
+// --- BONUSES (ADMIN) ---
+
+function currentMonthYYYYMM(): string {
+  const d = new Date();
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function previousMonthYYYYMM(base?: string): string {
+  if (base && /^\d{6}$/.test(base)) {
+    const year = Number(base.slice(0,4));
+    const month = Number(base.slice(4));
+    const date = new Date(year, month - 2, 1);
+    return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}`;
+  }
+  const d = new Date();
+  const date = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+  return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+async function resolveManagerType(db: FirebaseFirestore.Firestore, managerId: string): Promise<'live'|'team'> {
+  try {
+    const m = await db.collection('managers').doc(managerId).get();
+    const t = (m.exists ? (m.data()?.type || 'live') : 'live').toString().toLowerCase();
+    return (t === 'team') ? 'team' : 'live';
+  } catch { return 'live'; }
+}
+
+function defaultBonusAmount(type: 'RECRUITMENT_BONUS'|'GRADUATION_BONUS'|'DIAMOND_BONUS', managerType: 'live'|'team'): number {
+  // Defaults; can later be replaced with dynamic config
+  const map: Record<string, { live: number; team: number }> = {
+    RECRUITMENT_BONUS: { live: 50, team: 60 },
+    GRADUATION_BONUS: { live: 50, team: 60 },
+    DIAMOND_BONUS: { live: 50, team: 60 },
+  };
+  return map[type][managerType];
+}
+
+apiRouter.post('/bonuses/award', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: 'Admin role required' });
+    return;
+  }
+  try {
+    const db = admin.firestore();
+    const { managerId, period, type, description, amount } = req.body as {
+      managerId: string;
+      period?: string; // YYYYMM
+      type: 'RECRUITMENT_BONUS'|'GRADUATION_BONUS'|'DIAMOND_BONUS';
+      description?: string;
+      amount?: number;
+    };
+
+    if (!managerId || !type) {
+      res.status(400).json({ error: 'managerId and type are required' });
+      return;
+    }
+
+    const month = (period && /^\d{6}$/.test(period)) ? period : currentMonthYYYYMM();
+
+    // Resolve manager type
+    const mType = await resolveManagerType(db, managerId);
+    const finalAmount = Math.round(((typeof amount === 'number' && amount > 0) ? amount : defaultBonusAmount(type, mType)) * 100) / 100;
+
+    // Prevent duplicates: one bonus type per manager per month
+    const bonusId = `${managerId}_${month}_${type}`;
+    const existing = await db.collection('bonuses').doc(bonusId).get();
+    if (existing.exists) {
+      res.status(409).json({ error: 'Bonus already awarded for this manager and month', code: 'DUPLICATE_BONUS' });
+      return;
+    }
+
+    // Optional diamond eligibility check (soft-check; warn only)
+    let eligibility: { ok: boolean; note?: string } = { ok: true };
+    if (type === 'DIAMOND_BONUS') {
+      try {
+        const current = await db.collection('manager-earnings').doc(`${managerId}_${month}`).get();
+        const prevMonth = previousMonthYYYYMM(month);
+        const prev = await db.collection('managerMonthlyNets').doc(`${managerId}_${prevMonth}`).get();
+        const currentNet = current.exists ? (current.data()?.totalNet || 0) : 0;
+        const prevNet = prev.exists ? (prev.data()?.netAmount || 0) : 0;
+        if (prevNet > 0 && currentNet < 1.2 * prevNet) {
+          eligibility = { ok: false, note: `Current net €${currentNet.toFixed(2)} < 120% of previous net €${prevNet.toFixed(2)}` };
+        }
+      } catch {}
+    }
+
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const bonusRef = db.collection('bonuses').doc(bonusId);
+
+    await bonusRef.set({
+      managerId,
+      month,
+      type,
+      amount: finalAmount,
+      createdAt: now,
+      createdBy: req.user?.uid || 'admin',
+      description: description || null,
+      managerTypeAtAward: mType,
+      awardMethod: 'MANUAL'
+    });
+
+    // Reflect immediately in monthly earnings totals (extras + totalEarnings)
+    const earningsRef = db.collection('manager-earnings').doc(`${managerId}_${month}`);
+    await earningsRef.set({
+      managerId,
+      month,
+      extras: admin.firestore.FieldValue.increment(finalAmount),
+      totalEarnings: admin.firestore.FieldValue.increment(finalAmount),
+      updatedAt: now,
+    }, { merge: true });
+
+    res.status(201).json({ success: true, month, amount: finalAmount, eligibility });
+  } catch (e:any) {
+    console.error('💥 Award bonus failed', e);
+    res.status(500).json({ error: 'Failed to award bonus', details: e.message });
+  }
+});
+
+// Backward compatibility: recruitment endpoint
+apiRouter.post('/bonuses/recruitment', async (req: AuthenticatedRequest, res: Response) => {
+  // Map to generic award endpoint
+  (req as any).body = {
+    managerId: req.body?.managerId,
+    period: req.body?.period,
+    type: 'RECRUITMENT_BONUS',
+    description: req.body?.description,
+    amount: req.body?.amount,
+  };
+  // @ts-ignore - reuse handler
+  return (apiRouter as any).handle({ ...req, method: 'POST', url: '/bonuses/award' }, res);
+});
+
+// Overview of extras for a given month (admin)
+apiRouter.get('/bonuses/overview', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: 'Admin role required' });
+    return;
+  }
+  try {
+    const db = admin.firestore();
+    const month = (req.query.month as string) || currentMonthYYYYMM();
+    const snap = await db.collection('bonuses').where('month','==', month).get();
+    const byManager: Record<string, { managerId: string; recruitment: number; graduation: number; diamond: number; total: number }> = {};
+    snap.forEach(d => {
+      const b = d.data();
+      const managerId = b.managerId as string;
+      if (!byManager[managerId]) byManager[managerId] = { managerId, recruitment: 0, graduation: 0, diamond: 0, total: 0 };
+      const amt = b.amount || 0;
+      byManager[managerId].total += amt;
+      switch (String(b.type || '').toUpperCase()) {
+        case 'RECRUITMENT_BONUS': byManager[managerId].recruitment += amt; break;
+        case 'GRADUATION_BONUS': byManager[managerId].graduation += amt; break;
+        case 'DIAMOND_BONUS': byManager[managerId].diamond += amt; break;
+      }
+    });
+
+    // Attach manager basic info
+    const result = Object.values(byManager);
+    for (const item of result) {
+      try {
+        const m = await admin.firestore().collection('managers').doc(item.managerId).get();
+        (item as any).managerHandle = (m.exists ? (m.data()?.handle || m.data()?.name) : item.managerId) || item.managerId;
+        (item as any).managerType = (m.exists ? (m.data()?.type || 'live') : 'live');
+      } catch {}
+    }
+
+    res.json({ success: true, month, data: result });
+  } catch (e:any) {
+    console.error('💥 bonuses/overview failed', e);
+    res.status(500).json({ error: 'Failed to load bonuses overview', details: e.message });
+  }
+});
 
 export { apiRouter }; 

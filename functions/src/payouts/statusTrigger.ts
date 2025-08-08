@@ -30,7 +30,7 @@ export const onPayoutStatusChange = onDocumentUpdated(
       });
 
       // Create notification message for manager
-      if (afterData.status === "APPROVED" || afterData.status === "DENIED") {
+      if (afterData.status === "APPROVED" || afterData.status === "REJECTED") {
         await db.collection("messages").add({
           userId: afterData.managerId,
           title: `Payout Request ${afterData.status}`,

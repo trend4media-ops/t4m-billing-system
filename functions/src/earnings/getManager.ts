@@ -41,6 +41,8 @@ export async function getManagerEarnings(
       net = 0,
       txCount = 0,
       baseCommission = 0;
+    let creatorCount = 0;
+    const creatorsAgg: Record<string, { creatorId: string; creatorHandle: string; gross: number; net: number; base: number; count: number }> = {};
 
     if (period) {
       const earningsDoc = await db.collection("manager-earnings").doc(`${managerId}_${period}`).get();
@@ -51,6 +53,27 @@ export async function getManagerEarnings(
         baseCommission = earningsData?.baseCommission || 0;
         txCount = earningsData?.transactionCount || 0;
         bonusSum = earningsData?.bonuses || 0;
+        creatorCount = earningsData?.creatorCount || 0;
+      }
+      // If creatorCount missing, compute from transactions for the month
+      if (!creatorCount) {
+        const q = await db.collection('transactions').where('managerId','==', managerId).where('month','==', period).get();
+        const set = new Set<string>();
+        q.forEach(d => {
+          const t: any = d.data();
+          set.add(t.creatorId || 'unknown');
+          if ((req.query.includeCreators === '1' || req.query.includeCreators === 'true')) {
+            const cid = t.creatorId || 'unknown';
+            const ch = t.creatorHandle || 'unknown';
+            const cur = creatorsAgg[cid] || { creatorId: cid, creatorHandle: ch, gross: 0, net: 0, base: 0, count: 0 };
+            cur.gross += t.grossAmount || 0;
+            cur.net += t.netForCommission || 0;
+            cur.base += t.baseCommission || 0;
+            cur.count += 1;
+            creatorsAgg[cid] = cur;
+          }
+        });
+        creatorCount = set.size;
       }
     } else {
       // If no period specified, aggregate all transactions
@@ -164,7 +187,10 @@ export async function getManagerEarnings(
       totalBonus,
       totalEarnings,
       transactionCount: txCount,
-      bonusCount: bonusSnap.size
+      bonusCount: bonusSnap.size,
+      creatorCount,
+      creators: (req.query.includeCreators === '1' || req.query.includeCreators === 'true') ?
+        Object.values(creatorsAgg).sort((a,b) => b.net - a.net) : undefined
     });
 
   } catch (error) {

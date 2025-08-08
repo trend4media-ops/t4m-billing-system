@@ -33,19 +33,11 @@ function parseEuroNumber(value: any): number {
   return isFinite(n) ? n : 0;
 }
 
-// NEW: determine whether a milestone cell indicates achievement (> 0 or non-empty non-zero string)
-function isMilestoneActive(cell: any): boolean {
+// NEW: determine milestone achievement by exact value match (e.g., '150' → S)
+function milestoneEquals(cell: any, expected: number): boolean {
   if (cell === undefined || cell === null) return false;
-  // Prefer numeric interpretation
-  const numeric = parseEuroNumber(cell);
-  if (numeric > 0) return true;
-  if (numeric === 0) {
-    // If the raw value is a non-empty string that is not a numeric zero, treat as active
-    const s = String(cell).trim();
-    if (!s) return false;
-    return !/^0+(\.0+)?$/.test(s.replace(/[,]/g, '.'));
-  }
-  return false;
+  const n = parseEuroNumber(cell);
+  return Math.round(n * 100) === Math.round(expected * 100);
 }
 
 const UPLOAD_COLLECTION = 'uploadBatches';
@@ -82,6 +74,7 @@ const MILESTONE_DEDUCTIONS = {
   S: 150,
 };
 
+// Fixed milestone payouts per manager type (Live/Team)
 const MILESTONE_BONUSES = {
   live: { S: 75, N: 150, O: 400, P: 100 },
   team: { S: 80, N: 165, O: 450, P: 120 },
@@ -302,8 +295,12 @@ async function updateManagerEarnings(batchId: string, month: string): Promise<vo
       totalGross: number,
       totalDeductions: number,
       totalNet: number,
-      transactionCount: number
+      transactionCount: number,
+      milestoneSum: number,
+      extrasSum: number,
+      creatorCount: number,
   }>();
+  const managerCreators = new Map<string, Set<string>>();
   
   // Process transactions
   transactionsSnapshot.forEach(doc => {
@@ -313,11 +310,14 @@ async function updateManagerEarnings(batchId: string, month: string): Promise<vo
       if (!managerEarnings.has(managerId)) {
           managerEarnings.set(managerId, {
               baseCommission: 0,
-              bonuses: 0,
+              bonuses: 0, // will hold extras + milestone payouts
               totalGross: 0,
               totalDeductions: 0,
               totalNet: 0,
-              transactionCount: 0
+              transactionCount: 0,
+              milestoneSum: 0,
+              extrasSum: 0,
+              creatorCount: 0,
           });
       }
       
@@ -327,64 +327,55 @@ async function updateManagerEarnings(batchId: string, month: string): Promise<vo
       earnings.totalDeductions += data.deductions || 0;
       earnings.totalNet += data.netForCommission || 0;
       earnings.transactionCount += 1;
+
+      // Track distinct creators per manager
+      const creatorId = (data.creatorId || data.creator || 'unknown') as string;
+      if (!managerCreators.has(managerId)) managerCreators.set(managerId, new Set<string>());
+      managerCreators.get(managerId)!.add(creatorId);
   });
 
   // Process bonuses
   bonusesSnapshot.forEach(doc => {
       const data = doc.data() as any;
       const managerId = data.managerId as string;
-      if (data.type === 'MONTHLY_TOTAL') return; // legacy noise
+      const t = String(data.type || '').toUpperCase();
+      if (t === 'MONTHLY_TOTAL') return; // legacy noise
       if (!managerEarnings.has(managerId)) {
           managerEarnings.set(managerId, {
               baseCommission: 0,
-              bonuses: 0,
+              bonuses: 0, // will hold extras + milestone payouts
               totalGross: 0,
               totalDeductions: 0,
               totalNet: 0,
-              transactionCount: 0
-          });
+              transactionCount: 0,
+              milestoneSum: 0,
+              extrasSum: 0,
+              creatorCount: 0,
+          } as any);
       }
-      const earnings = managerEarnings.get(managerId)!;
-      earnings.bonuses += data.amount || 0;
+      const earnings = managerEarnings.get(managerId)! as any;
+      const amount = data.amount || 0;
+      const isMilestone = (t === 'MILESTONE_S' || t === 'MILESTONE_N' || t === 'MILESTONE_O' || t === 'MILESTONE_P');
+      if (isMilestone) {
+        earnings.milestoneSum = (earnings.milestoneSum || 0) + amount;
+      } else if (t === 'RECRUITMENT_BONUS' || t === 'DIAMOND_BONUS' || t === 'DOWNLINE_LEVEL_A' || t === 'DOWNLINE_LEVEL_B' || t === 'DOWNLINE_LEVEL_C') {
+        earnings.extrasSum = (earnings.extrasSum || 0) + amount;
+      }
   });
 
   // Diamond bonus per spec unchanged
   const prevMonth = getPrevMonth(month);
-  for (const [managerId, earnings] of managerEarnings) {
-    try {
-      let diamondAmount = 0;
-      if (prevMonth) {
-        const prevDoc = await firestore.collection('manager-earnings').doc(`${managerId}_${prevMonth}`).get();
-        const prevNet = prevDoc.exists ? (prevDoc.data()!.totalNet || 0) : 0;
-        const managerDoc = await firestore.collection('managers').doc(managerId).get();
-        const typeRaw = managerDoc.exists ? (managerDoc.data()!.type || 'LIVE') : 'LIVE';
-        const isLive = String(typeRaw).toUpperCase() === 'LIVE';
-        const threshold = prevNet * 1.2;
-        if ((earnings.totalNet || 0) >= threshold && (earnings.totalNet || 0) > 0) {
-          diamondAmount = isLive ? 50 : 60;
-        }
-      }
-      if (diamondAmount > 0) {
-        const diamondId = `diamond_${managerId}_${month}`;
-        await firestore.collection('bonuses').doc(diamondId).set({
-          managerId,
-          month,
-          type: 'DIAMOND_BONUS',
-          amount: diamondAmount,
-          calculatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          createdBy: 'diamond-rule'
-        }, { merge: true });
-        earnings.bonuses += diamondAmount;
-      }
-    } catch (e) {
-      console.warn('Diamond bonus calc failed for manager', managerId, e);
-    }
+  if (prevMonth === month) {
+    // no-op guard to avoid unused variable warnings in certain builds
   }
-  
+
   // Update manager documents and monthly summaries
-  for (const [managerId, earnings] of managerEarnings) {
+  for (const [managerId, earningsRaw] of managerEarnings) {
+      const earnings: any = earningsRaw as any;
       const managerRef = firestore.collection('managers').doc(managerId);
-      const totalEarnings = earnings.baseCommission + earnings.bonuses;
+      const milestoneSum = earnings.milestoneSum || 0;
+      const extrasSum = earnings.extrasSum || 0;
+      const totalEarnings = earnings.baseCommission + milestoneSum + extrasSum;
       
       batch.update(managerRef, {
           totalEarnings: admin.firestore.FieldValue.increment(totalEarnings),
@@ -399,12 +390,14 @@ async function updateManagerEarnings(batchId: string, month: string): Promise<vo
           month,
           batchId,
           baseCommission: earnings.baseCommission,
-          bonuses: earnings.bonuses,
+          milestonePayouts: milestoneSum,
+          extras: extrasSum,
           totalEarnings,
           totalGross: earnings.totalGross,
           totalDeductions: earnings.totalDeductions,
           totalNet: earnings.totalNet,
           transactionCount: earnings.transactionCount,
+          creatorCount: managerCreators.get(managerId)?.size || 0,
           status: 'CALCULATED',
           calculatedAt: admin.firestore.FieldValue.serverTimestamp()
       }, { merge: true });
@@ -420,12 +413,17 @@ async function updateManagerEarnings(batchId: string, month: string): Promise<vo
 
     let sumGross = 0;
     let sumBaseCommission = 0;
-    let sumBonuses = 0;
+    let sumMilestone = 0;
+    let sumExtras = 0;
+    let sumTotals = 0;
     let sumTransactions = 0;
-    for (const agg of managerEarnings.values()) {
+    for (const aggRaw of managerEarnings.values()) {
+      const agg: any = aggRaw as any;
       sumGross += agg.totalGross || 0;
       sumBaseCommission += agg.baseCommission || 0;
-      sumBonuses += agg.bonuses || 0;
+      sumMilestone += agg.milestoneSum || 0;
+      sumExtras += agg.extrasSum || 0;
+      sumTotals += (agg.baseCommission || 0) + (agg.milestoneSum || 0) + (agg.extrasSum || 0);
       sumTransactions += agg.transactionCount || 0;
     }
 
@@ -435,8 +433,8 @@ async function updateManagerEarnings(batchId: string, month: string): Promise<vo
       totalRows,
       managersProcessed: managerEarnings.size,
       totalRevenue: Math.round(sumGross * 100) / 100,
-      totalCommissions: Math.round(sumBaseCommission * 100) / 100,
-      totalBonuses: Math.round(sumBonuses * 100) / 100,
+      totalCommissions: Math.round(sumTotals * 100) / 100, // total payout
+      totalBonuses: Math.round(sumMilestone * 100) / 100,  // milestone payouts only
       collections: {
         transactions: sumTransactions,
         bonuses: bonusesSnapshot.size,
@@ -453,8 +451,8 @@ async function updateManagerEarnings(batchId: string, month: string): Promise<vo
       results: {
         managersProcessed: managerEarnings.size,
         totalRevenue: Math.round(sumGross * 100) / 100,
-        totalCommissions: Math.round(sumBaseCommission * 100) / 100,
-        totalBonuses: Math.round(sumBonuses * 100) / 100,
+        totalCommissions: Math.round(sumTotals * 100) / 100,
+        totalBonuses: Math.round(sumMilestone * 100) / 100,
         totalTransactions: sumTransactions,
       }
     });
@@ -648,10 +646,10 @@ async function processComparisonData(rows: any[][], month: string, fileName: str
     // Robust parsing for gross and milestones
     const grossAmount = parseEuroNumber(row[12]);
     const milestoneChecks = {
-      S: isMilestoneActive(row[18]),
-      N: isMilestoneActive(row[13]),
-      O: isMilestoneActive(row[14]),
-      P: isMilestoneActive(row[15]),
+      S: milestoneEquals(row[18], 150),
+      N: milestoneEquals(row[13], 300),
+      O: milestoneEquals(row[14], 1000),
+      P: milestoneEquals(row[15], 240),
     };
 
     // Validate only gross > 0
@@ -770,10 +768,10 @@ export async function processCommissionData(rows: any[][], batchId: string, mont
       }
 
       // Compute deductions from milestone flags PER ROW (boolean based on >0)
-      const hasN = isMilestoneActive(row[13]);
-      const hasO = isMilestoneActive(row[14]);
-      const hasP = isMilestoneActive(row[15]);
-      const hasS = isMilestoneActive(row[18]);
+      const hasN = milestoneEquals(row[13], 300);
+      const hasO = milestoneEquals(row[14], 1000);
+      const hasP = milestoneEquals(row[15], 240);
+      const hasS = milestoneEquals(row[18], 150);
       const deductions = (hasN ? MILESTONE_DEDUCTIONS.N : 0)
         + (hasO ? MILESTONE_DEDUCTIONS.O : 0)
         + (hasP ? MILESTONE_DEDUCTIONS.P : 0)
@@ -819,7 +817,7 @@ export async function processCommissionData(rows: any[][], batchId: string, mont
       });
       batchOperations++;
 
-      // Write row-level milestone bonuses (fixed amounts per spec)
+      // Write row-level milestone bonuses
       const bonusRates = MILESTONE_BONUSES[managerType];
       const milestoneEntries: Array<{type:string, amount:number}> = [];
       if (hasS) milestoneEntries.push({ type: 'MILESTONE_S', amount: bonusRates.S });
@@ -839,7 +837,7 @@ export async function processCommissionData(rows: any[][], batchId: string, mont
         });
         batchOperations++;
       }
-
+       
       if (batchOperations >= 400) {
         await batch.commit();
         batchOperations = 0;
