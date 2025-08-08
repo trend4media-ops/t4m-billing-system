@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from "../middleware/auth";
 import { Response } from "express";
 import * as admin from "firebase-admin";
 import { calculateDownlineForPeriod } from "../downline-calculator";
+import { CommissionConfigService } from '../services/commissionConfig';
 
 const adminPayoutsRouter = Router();
 
@@ -184,6 +185,20 @@ adminPayoutsRouter.get("/payouts/stats", async (req: AuthenticatedRequest, res: 
         console.error("💥 Error fetching payout stats:", error);
         res.status(500).json({ error: "Failed to fetch payout statistics" });
     }
+});
+
+// Commission config read-only endpoint for admins
+adminPayoutsRouter.get('/config/commission', async (req: AuthenticatedRequest, res) => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: 'Admin role required' });
+    return;
+  }
+  try {
+    const config = await CommissionConfigService.getInstance().getActiveConfig();
+    res.json({ success: true, config });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to load commission config', details: e.message });
+  }
 });
 
 export { adminPayoutsRouter }; 

@@ -25,6 +25,7 @@ import {
   getTeamByManagerId,
   getDownlineCompensation
 } from "../genealogy/genealogy";
+import { CommissionConfigService } from "../services/commissionConfig";
 
 const apiRouter = Router();
 
@@ -521,7 +522,26 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
           if (t === 'DIAMOND_BONUS') extrasBreakdown.diamond += amt;
         });
       } catch {}
-      
+
+      // Diamond eligibility preview (for UI badge)
+      let diamondEligible: boolean | null = null;
+      try {
+        const config = await CommissionConfigService.getInstance().getActiveConfig();
+        const threshold = config.diamondThreshold ?? 1.2;
+        const prevMonth = (() => {
+          const y = Number(month.slice(0,4));
+          const m = Number(month.slice(4));
+          const d = new Date(y, m - 2, 1);
+          return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`;
+        })();
+        const prev = await db.collection('managerMonthlyNets').doc(`${data.managerId}_${prevMonth}`).get();
+        const prevNet = prev.exists ? (prev.data()?.netAmount || 0) : 0;
+        if (prevNet > 0) {
+          const currentNet = data.totalNet || 0;
+          diamondEligible = currentNet >= threshold * prevNet;
+        }
+      } catch {}
+ 
       managers.push({
         managerId: data.managerId,
         managerHandle: (managerData?.handle || managerData?.name || data.managerId) as string,
@@ -539,6 +559,7 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
         totalEarnings: total,
         extrasTotal: extrasSum,
         extrasBreakdown,
+        diamondEligible,
       });
       
       totalRevenue += data.totalGross || 0;
@@ -1076,14 +1097,12 @@ async function resolveManagerType(db: FirebaseFirestore.Firestore, managerId: st
   } catch { return 'live'; }
 }
 
-function defaultBonusAmount(type: 'RECRUITMENT_BONUS'|'GRADUATION_BONUS'|'DIAMOND_BONUS', managerType: 'live'|'team'): number {
-  // Defaults; can later be replaced with dynamic config
-  const map: Record<string, { live: number; team: number }> = {
-    RECRUITMENT_BONUS: { live: 50, team: 60 },
-    GRADUATION_BONUS: { live: 50, team: 60 },
-    DIAMOND_BONUS: { live: 50, team: 60 },
-  };
-  return map[type][managerType];
+async function dynamicBonusAmount(type: 'RECRUITMENT_BONUS'|'GRADUATION_BONUS'|'DIAMOND_BONUS', managerType: 'live'|'team'): Promise<number> {
+  const config = await CommissionConfigService.getInstance().getActiveConfig();
+  if (type === 'RECRUITMENT_BONUS') return (config.recruitmentBonusPayouts?.[managerType] ?? (managerType==='live'?50:60));
+  if (type === 'GRADUATION_BONUS') return (config.graduationBonusPayouts?.[managerType] ?? (managerType==='live'?50:60));
+  if (type === 'DIAMOND_BONUS') return (config.diamondBonusPayouts?.[managerType] ?? (managerType==='live'?50:60));
+  return managerType==='live'?50:60;
 }
 
 apiRouter.post('/bonuses/award', async (req: AuthenticatedRequest, res: Response) => {
@@ -1110,7 +1129,8 @@ apiRouter.post('/bonuses/award', async (req: AuthenticatedRequest, res: Response
 
     // Resolve manager type
     const mType = await resolveManagerType(db, managerId);
-    const finalAmount = Math.round(((typeof amount === 'number' && amount > 0) ? amount : defaultBonusAmount(type, mType)) * 100) / 100;
+    const computed = await dynamicBonusAmount(type, mType);
+    const finalAmount = Math.round(((typeof amount === 'number' && amount > 0) ? amount : computed) * 100) / 100;
 
     // Prevent duplicates: one bonus type per manager per month
     const bonusId = `${managerId}_${month}_${type}`;
@@ -1129,8 +1149,9 @@ apiRouter.post('/bonuses/award', async (req: AuthenticatedRequest, res: Response
         const prev = await db.collection('managerMonthlyNets').doc(`${managerId}_${prevMonth}`).get();
         const currentNet = current.exists ? (current.data()?.totalNet || 0) : 0;
         const prevNet = prev.exists ? (prev.data()?.netAmount || 0) : 0;
-        if (prevNet > 0 && currentNet < 1.2 * prevNet) {
-          eligibility = { ok: false, note: `Current net €${currentNet.toFixed(2)} < 120% of previous net €${prevNet.toFixed(2)}` };
+        const threshold = (await CommissionConfigService.getInstance().getActiveConfig()).diamondThreshold ?? 1.2;
+        if (prevNet > 0 && currentNet < threshold * prevNet) {
+          eligibility = { ok: false, note: `Current NET ${currentNet.toFixed(2)} < ${(threshold*100).toFixed(0)}% of previous NET ${prevNet.toFixed(2)}` };
         }
       } catch {}
     }
@@ -1219,6 +1240,30 @@ apiRouter.get('/bonuses/overview', async (req: AuthenticatedRequest, res: Respon
   } catch (e:any) {
     console.error('💥 bonuses/overview failed', e);
     res.status(500).json({ error: 'Failed to load bonuses overview', details: e.message });
+  }
+});
+
+// Diamond eligibility endpoint for UI indicators
+apiRouter.get('/bonuses/eligibility/:managerId', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: 'Admin role required' });
+    return;
+  }
+  try {
+    const db = admin.firestore();
+    const { managerId } = req.params;
+    const month = (req.query.month as string) || (() => { const d=new Date(); return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`; })();
+    const config = await CommissionConfigService.getInstance().getActiveConfig();
+    const threshold = config.diamondThreshold ?? 1.2;
+    const prevMonth = previousMonthYYYYMM(month);
+    const current = await db.collection('manager-earnings').doc(`${managerId}_${month}`).get();
+    const prev = await db.collection('managerMonthlyNets').doc(`${managerId}_${prevMonth}`).get();
+    const currentNet = current.exists ? (current.data()?.totalNet || 0) : 0;
+    const prevNet = prev.exists ? (prev.data()?.netAmount || 0) : 0;
+    const eligible = prevNet > 0 ? (currentNet >= threshold * prevNet) : false;
+    res.json({ success: true, month, threshold, currentNet, prevNet, eligible });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to check eligibility', details: e.message });
   }
 });
 
