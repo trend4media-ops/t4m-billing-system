@@ -33,15 +33,17 @@ adminPayoutsRouter.get("/payouts", async (req: AuthenticatedRequest, res: Respon
         const db = admin.firestore();
         const allowed = new Set(["SUBMITTED","APPROVED","IN_PROGRESS","PAID","REJECTED"]);
         const filter = (req.query.filter as string) || '';
+        const period = (req.query.period as string) || '';
 
-        let snapshot: FirebaseFirestore.QuerySnapshot;
+        let baseQuery: FirebaseFirestore.Query = db.collection("payoutRequests");
         if (filter && allowed.has(filter)) {
-            snapshot = await db.collection("payoutRequests")
-                .where("status","==",filter)
-                .get(); // sort in-memory to avoid composite index
-        } else {
-            snapshot = await db.collection("payoutRequests").get();
+            baseQuery = baseQuery.where("status","==",filter);
         }
+        if (period && /^\d{6}$/.test(period)) {
+            baseQuery = baseQuery.where("period","==",period);
+        }
+
+        const snapshot = await baseQuery.get();
 
         const payouts = snapshot.docs
             .map(d => ({ id: d.id, ...d.data() }))
@@ -52,7 +54,8 @@ adminPayoutsRouter.get("/payouts", async (req: AuthenticatedRequest, res: Respon
             })
             .map((p:any) => ({
                 ...p,
-                requestedAt: p.requestedAt?.toDate ? p.requestedAt.toDate().toISOString() : (p.requestedAt || null)
+                requestedAt: p.requestedAt?.toDate ? p.requestedAt.toDate().toISOString() : (p.requestedAt || null),
+                managerId: p.managerId || p.userId || undefined
             }));
 
         res.status(200).json({ data: payouts });
