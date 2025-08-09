@@ -42,6 +42,7 @@ export const getAllManagerEarnings = async (req: AuthenticatedRequest, res: Resp
             managersMap.set(doc.id, doc.data());
         });
         
+        const seen = new Set<string>();
         // Process earnings and get bonus breakdown
         for (const earningsDoc of earningsSnapshot.docs) {
             const earningsData = earningsDoc.data();
@@ -49,6 +50,7 @@ export const getAllManagerEarnings = async (req: AuthenticatedRequest, res: Resp
             const manager = managersMap.get(managerId);
             
             if (!manager) continue;
+            seen.add(managerId);
 
             summary.activeManagers++;
             
@@ -143,6 +145,36 @@ export const getAllManagerEarnings = async (req: AuthenticatedRequest, res: Resp
                 downlineIncome: bonusBreakdown.downlineIncome
             });
         }
+
+        // Append zero-rows for managers without earnings this month
+        managersMap.forEach((manager, managerId) => {
+            if (seen.has(managerId)) return;
+            earningsByManager.push({
+                managerId,
+                managerHandle: manager.name || manager.email,
+                managerName: manager.name || manager.handle,
+                managerType: manager.type || 'UNKNOWN',
+                month,
+                baseCommission: 0,
+                commissionTotal: 0,
+                milestoneBonuses: { S: 0, N: 0, O: 0, P: 0 },
+                graduationBonus: 0,
+                diamondBonus: 0,
+                recruitmentBonus: 0,
+                downlineIncome: { levelA: 0, levelB: 0, levelC: 0 },
+                bonusTotal: 0,
+                downlineTotal: 0,
+                totalEarnings: 0,
+                totalGross: 0,
+                totalDeductions: 0,
+                totalNet: 0,
+                transactionCount: 0,
+                creatorCount: 0,
+                type: manager.type || 'UNKNOWN',
+                bonusCount: 0,
+                status: 'NO_DATA',
+            });
+        });
 
         res.status(200).json({
             summary,

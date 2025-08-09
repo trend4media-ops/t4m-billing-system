@@ -27,6 +27,57 @@ adminPayoutsRouter.get('/recalc-downline', async (req: AuthenticatedRequest, res
     }
 });
 
+// Admin: Impersonate a manager (returns Firebase Custom Token)
+adminPayoutsRouter.post('/impersonate/:managerId', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { managerId } = req.params;
+    if (!managerId) {
+      res.status(400).json({ error: 'managerId required' });
+      return;
+    }
+    const db = admin.firestore();
+    const mgrDoc = await db.collection('managers').doc(managerId).get();
+    if (!mgrDoc.exists) {
+      res.status(404).json({ error: 'Manager not found' });
+      return;
+    }
+    const m: any = mgrDoc.data() || {};
+
+    // Ensure a Firebase Auth user exists for this managerId
+    try {
+      await admin.auth().getUser(managerId);
+    } catch (e: any) {
+      if (e.code === 'auth/user-not-found') {
+        await admin.auth().createUser({
+          uid: managerId,
+          email: m.email || undefined,
+          displayName: m.name || `${m.firstName || ''} ${m.lastName || ''}`.trim() || managerId,
+          emailVerified: !!m.email,
+        });
+      } else {
+        throw e;
+      }
+    }
+
+    // Set custom claims for manager role
+    const claims = {
+      role: 'MANAGER',
+      managerId: managerId,
+      firstName: m.firstName || '',
+      lastName: m.lastName || '',
+    } as any;
+    await admin.auth().setCustomUserClaims(managerId, claims);
+
+    // Create short-lived custom token to sign in on client
+    const token = await admin.auth().createCustomToken(managerId, claims);
+
+    res.status(200).json({ success: true, token, manager: { id: managerId, name: m.name || '', email: m.email || null } });
+  } catch (e: any) {
+    console.error('💥 Impersonation error:', e);
+    res.status(500).json({ error: 'Failed to impersonate manager', details: e?.message || String(e) });
+  }
+});
+
 // List all payout requests (optional filter by status)
 adminPayoutsRouter.get("/payouts", async (req: AuthenticatedRequest, res: Response) => {
     try {
