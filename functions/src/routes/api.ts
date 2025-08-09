@@ -849,6 +849,12 @@ apiRouter.post('/managers/generate-accounts', async (req: AuthenticatedRequest, 
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
 
+      // NEW: Persist resolved email back to managers collection for UI accuracy
+      await db.collection('managers').doc(managerId).set({
+        email,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+
       created += 1;
     }
 
