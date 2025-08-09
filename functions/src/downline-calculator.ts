@@ -38,17 +38,37 @@ export const calculateDownlineForPeriodHttp = onRequest(async (req, res) => {
 
 export async function calculateDownlineForPeriod(period: string): Promise<void> {
   console.log(`Calculating downline for period ${period}`);
+
+  // 0) Cleanup existing downline bonuses for this period to avoid stale values from older genealogy versions
+  // Delete any bonuses with type DOWNLINE_LEVEL_A/B/C for the given month
+  const toDeleteSnap = await db.collection('bonuses')
+    .where('month', '==', period)
+    .where('type', 'in', ['DOWNLINE_LEVEL_A', 'DOWNLINE_LEVEL_B', 'DOWNLINE_LEVEL_C'])
+    .get();
+  if (!toDeleteSnap.empty) {
+    console.log(`Deleting ${toDeleteSnap.size} existing downline bonus docs for period ${period} before recalculation`);
+    const CHUNK = 450;
+    for (let i = 0; i < toDeleteSnap.docs.length; i += CHUNK) {
+      const chunk = toDeleteSnap.docs.slice(i, i + CHUNK);
+      const b = db.batch();
+      chunk.forEach(d => b.delete(d.ref));
+      await b.commit();
+    }
+  }
+
   const managersSnapshot = await db.collection('managers').get();
   if (managersSnapshot.empty) return;
 
-  const batch = db.batch();
+  // We'll batch writes in chunks to stay under Firestore limits
+  let pendingBatch = db.batch();
+  let batchOps = 0;
   let bonusCount = 0;
 
   for (const managerDoc of managersSnapshot.docs) {
     const managerId = managerDoc.id;
     const managerHandle = (managerDoc.data().name || managerDoc.data().handle || managerId) as string;
 
-    // Get direct downline (Level A)
+    // Get direct downline (Level A/B/C assignments)
     const downlineSnapshot = await db.collection('genealogy').where('teamManagerId', '==', managerId).get();
     if (downlineSnapshot.empty) continue;
 
@@ -72,8 +92,11 @@ export async function calculateDownlineForPeriod(period: string): Promise<void> 
       const rate = DOWNLINE_COMMISSION_RATES[level];
       const commission = downlineBase * rate;
 
-      const bonusRef = db.collection('bonuses').doc();
-      batch.set(bonusRef, {
+      // Deterministic document id to ensure idempotency per (period, teamManager, liveManager, level)
+      const bonusId = `downline_${period}_${managerId}_${downlineManagerId}_${level}`;
+      const bonusRef = db.collection('bonuses').doc(bonusId);
+
+      pendingBatch.set(bonusRef, {
         managerId: managerId,
         managerHandle: managerHandle,
         type: `DOWNLINE_LEVEL_${level}`,
@@ -88,12 +111,21 @@ export async function calculateDownlineForPeriod(period: string): Promise<void> 
         createdBy: 'downline-calculator',
       });
       bonusCount++;
+      batchOps++;
+
+      if (batchOps >= 450) {
+        await pendingBatch.commit();
+        pendingBatch = db.batch();
+        batchOps = 0;
+      }
     }
   }
 
-  if (bonusCount > 0) {
-    await batch.commit();
+  if (batchOps > 0) {
+    await pendingBatch.commit();
   }
+
+  console.log(`Downline calculation for ${period} completed. Created ${bonusCount} bonus entries.`);
 }
 
 function getPreviousMonthPeriod(): string {

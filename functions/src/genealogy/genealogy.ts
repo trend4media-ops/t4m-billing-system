@@ -65,6 +65,7 @@ export const getDownlineCompensation = async (req: AuthenticatedRequest, res: Re
       const liveManagerId: string | undefined = g.liveManagerId;
       const level: 'A'|'B'|'C' = (String(g.level || 'A').toUpperCase() as any);
       if (!teamManagerId || !liveManagerId) continue;
+      if (teamManagerId === liveManagerId) continue; // ignore self-links
 
       // Sum child's BASE COMMISSION for the month
       const txSnap = await db.collection('transactions')
@@ -100,7 +101,7 @@ export const getDownlineCompensation = async (req: AuthenticatedRequest, res: Re
         computedCommission: Math.round(computed * 100) / 100,
         bookedCommission: Math.round(booked * 100) / 100,
         paidCommission: 0,
-        delta: Math.round((computed - 0) * 100) / 100,
+        delta: Math.round((computed - booked) * 100) / 100,
       });
     }
 

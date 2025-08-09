@@ -17,6 +17,8 @@ interface AvailableEarnings {
     euroExtrasTotal: number; // EUR (Diamond, Graduation, Recruitment)
     euroDownlineTotal: number; // EUR
   };
+  totalUSD?: number; // New: full USD basis before conversion
+  totalEUR?: number; // New: converted amount using fx
 }
 
 export async function getAvailableEarnings(
@@ -105,6 +107,7 @@ export async function getAvailableEarnings(
     const euroExtrasTotal = Math.round((diamond + graduation + recruitment) * 100) / 100;
     const euroDownlineTotal = Math.round((downA + downB + downC) * 100) / 100;
 
+    const totalUSD = Math.round((usdDerivedBasePlusMilestonesUSD + (euroExtrasTotal + euroDownlineTotal) / usdToEur) * 100) / 100; // reflect complete USD basis for UI if needed
     const dynamicTotalEUR = Math.round((usdDerivedBasePlusMilestonesEUR + euroExtrasTotal + euroDownlineTotal) * 100) / 100;
 
     // Already requested (all statuses)
@@ -150,7 +153,9 @@ export async function getAvailableEarnings(
         usdDerivedBasePlusMilestonesEUR: Math.round(usdDerivedBasePlusMilestonesEUR * 100) / 100,
         euroExtrasTotal,
         euroDownlineTotal,
-      }
+      },
+      totalUSD,
+      totalEUR: Math.round(dynamicTotalEUR * 100) / 100,
     };
     
     res.json({
