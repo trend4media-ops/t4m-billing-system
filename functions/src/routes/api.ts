@@ -1362,29 +1362,59 @@ apiRouter.get('/bonuses/overview', async (req: AuthenticatedRequest, res: Respon
     const db = admin.firestore();
     const month = (req.query.month as string) || currentMonthYYYYMM();
     const snap = await db.collection('bonuses').where('month','==', month).get();
-    const byManager: Record<string, { managerId: string; recruitment: number; graduation: number; diamond: number; total: number }> = {};
+    const byManager: Record<string, { managerId: string; recruitment: number; graduation: number; diamond: number; total: number } & { managerHandle?: string; managerType?: string; diamondEligible?: boolean } > = {};
     snap.forEach(d => {
       const b = d.data();
       const managerId = b.managerId as string;
+      if (!managerId) return;
       if (!byManager[managerId]) byManager[managerId] = { managerId, recruitment: 0, graduation: 0, diamond: 0, total: 0 };
-      const amt = b.amount || 0;
+      const amt = Number(b.amount || 0) || 0;
+      const t = String(b.type || '').toUpperCase();
+      if (t === 'RECRUITMENT_BONUS') byManager[managerId].recruitment += amt;
+      if (t === 'GRADUATION_BONUS') byManager[managerId].graduation += amt;
+      if (t === 'DIAMOND_BONUS') byManager[managerId].diamond += amt;
       byManager[managerId].total += amt;
-      switch (String(b.type || '').toUpperCase()) {
-        case 'RECRUITMENT_BONUS': byManager[managerId].recruitment += amt; break;
-        case 'GRADUATION_BONUS': byManager[managerId].graduation += amt; break;
-        case 'DIAMOND_BONUS': byManager[managerId].diamond += amt; break;
-      }
     });
 
-    // Attach manager basic info
+    // Attach manager basic info and validate diamond eligibility per manager
     const result = Object.values(byManager);
-    for (const item of result) {
+
+    const config = await CommissionConfigService.getInstance().getActiveConfig();
+    const threshold = config.diamondThreshold ?? 1.2;
+    const prevMonth = previousMonthYYYYMM(month);
+
+    await Promise.all(result.map(async (item) => {
       try {
-        const m = await admin.firestore().collection('managers').doc(item.managerId).get();
+        const m = await db.collection('managers').doc(item.managerId).get();
         (item as any).managerHandle = (m.exists ? (m.data()?.handle || m.data()?.name) : item.managerId) || item.managerId;
         (item as any).managerType = (m.exists ? (m.data()?.type || 'live') : 'live');
       } catch {}
-    }
+
+      // Only compute eligibility if there is a diamond amount recorded
+      if (item.diamond > 0) {
+        try {
+          const [current, prev] = await Promise.all([
+            db.collection('manager-earnings').doc(`${item.managerId}_${month}`).get(),
+            db.collection('managerMonthlyNets').doc(`${item.managerId}_${prevMonth}`).get(),
+          ]);
+          const currentNet = current.exists ? (current.data()?.totalNet || 0) : 0;
+          const prevNet = prev.exists ? (prev.data()?.netAmount || 0) : 0;
+          const eligible = prevNet > 0 && currentNet >= threshold * prevNet;
+          (item as any).diamondEligible = eligible;
+          if (!eligible) {
+            // Ignore ineligible diamond amounts in the overview totals to avoid misleading display
+            item.diamond = 0;
+          }
+        } catch {
+          (item as any).diamondEligible = null;
+        }
+      } else {
+        (item as any).diamondEligible = false;
+      }
+
+      // Recompute total from components to ensure consistency
+      item.total = Math.round((item.recruitment + item.graduation + item.diamond) * 100) / 100;
+    }));
 
     res.json({ success: true, month, data: result });
   } catch (e:any) {
