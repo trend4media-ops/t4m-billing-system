@@ -11,6 +11,7 @@ import { processUploadedExcel } from "../excel-calculator"; // Import the new fu
 import { getAllManagerEarnings } from "../managers/getAllEarnings";
 import { getMessages, markMessageAsRead } from "../messages/getMessages";
 import { createMessage } from "../messages/createMessage";
+import { broadcastMessage, getBroadcastStatus } from "../messages/broadcast";
 import { getUnreadMessagesCount } from "../messages/getUnreadCount";
 import { getUploadBatchStatus } from "../uploads/getUploadStatus";
 import { adminPayoutsRouter } from "./admin";
@@ -28,6 +29,7 @@ import {
 } from "../genealogy/genealogy";
 import { CommissionConfigService } from "../services/commissionConfig";
 import { getMonthlyFxRate } from "../fx/getMonthlyRate";
+import { getProfile, changePassword, changeEmail, updateBank, adminUpdateManagerCredentials, adminUpdateManagerBank } from "../auth/profile";
 
 const apiRouter = Router();
 
@@ -64,6 +66,16 @@ apiRouter.get("/health", async (req, res) => {
 
 // All other API routes are protected
 apiRouter.use(authMiddleware);
+
+// --- PROFILE / AUTH ---
+apiRouter.get('/auth/profile', getProfile);
+apiRouter.put('/auth/change-password', changePassword);
+apiRouter.put('/auth/change-email', changeEmail);
+apiRouter.put('/managers/me/bank', updateBank);
+
+// Admin variants
+apiRouter.put('/admin/managers/:managerId/credentials', adminUpdateManagerCredentials);
+apiRouter.put('/admin/managers/:managerId/bank', adminUpdateManagerBank);
 
 // --- FX RATES ---
 apiRouter.get('/fx/monthly', getMonthlyFxRate);
@@ -474,82 +486,131 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
     // Prefer active batch for the month
     const activeBatchSnap = await db.collection('uploadBatches').where('month', '==', month).where('active', '==', true).limit(1).get();
     const preferredBatchId = activeBatchSnap.empty ? null : activeBatchSnap.docs[0].id;
-    
-    // Load manager-earnings for the month (they are overwritten per month on each processing)
+
+    // Load all manager earnings for the month
     const earningsSnapshot = await db.collection('manager-earnings')
       .where('month', '==', month)
       .get();
-    
+
+    const earningsDocs = earningsSnapshot.docs;
+    const managerIds = earningsDocs.map(d => (d.data().managerId as string)).filter(Boolean);
+
+    // Fetch commission config once
+    const config = await CommissionConfigService.getInstance().getActiveConfig();
+    const diamondThreshold = config.diamondThreshold ?? 1.2;
+
+    // Prepare parallel fetches to eliminate N+1 patterns
+    const prevMonth = (() => {
+      const y = Number(month.slice(0,4));
+      const m = Number(month.slice(4));
+      const d = new Date(y, m - 2, 1);
+      return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`;
+    })();
+
+    // 1) Managers documents (parallel gets)
+    const managerDocPromises = managerIds.map(id => db.collection('managers').doc(id).get());
+
+    // 2) Bonuses for this month (single query, grouped by manager)
+    const bonusesPromise = db.collection('bonuses')
+      .where('month','==', month)
+      .get();
+
+    // 3) Fallback creator counts: only if any earnings doc lacks creatorCount
+    const needsCreatorCounts = earningsDocs.some(d => !(d.data().creatorCount > 0));
+    const transactionsPromise = needsCreatorCounts
+      ? db.collection('transactions').where('month','==', month).get()
+      : Promise.resolve(null as any);
+
+    // 4) Previous month net docs for diamond eligibility (parallel gets)
+    const prevNetDocPromises = managerIds.map(id => db.collection('managerMonthlyNets').doc(`${id}_${prevMonth}`).get());
+
+    // Await parallel fetches
+    const [managerDocSnaps, bonusesSnap, transactionsSnap, prevNetDocSnaps] = await Promise.all([
+      Promise.all(managerDocPromises),
+      bonusesPromise,
+      transactionsPromise,
+      Promise.all(prevNetDocPromises),
+    ]);
+
+    // Build helpers/maps
+    const managersMap = new Map<string, any>();
+    (managerDocSnaps || []).forEach(doc => { if (doc && doc.exists) managersMap.set(doc.id, doc.data()); });
+
+    const extrasByManager = new Map<string, { recruitment: number; graduation: number; diamond: number }>();
+    if (bonusesSnap) {
+      bonusesSnap.forEach((bDoc: any) => {
+        const b = bDoc.data();
+        const mid = String(b.managerId || '');
+        if (!mid) return;
+        const entry = extrasByManager.get(mid) || { recruitment: 0, graduation: 0, diamond: 0 };
+        const t = String(b.type || '').toUpperCase();
+        const amt = b.amount || 0;
+        if (t === 'RECRUITMENT_BONUS') entry.recruitment += amt;
+        if (t === 'GRADUATION_BONUS') entry.graduation += amt;
+        if (t === 'DIAMOND_BONUS') entry.diamond += amt;
+        extrasByManager.set(mid, entry);
+      });
+    }
+
+    const creatorCountsByManager = new Map<string, number>();
+    if (transactionsSnap) {
+      const perManagerCreators = new Map<string, Set<string>>();
+      transactionsSnap.forEach((tDoc: any) => {
+        const t = tDoc.data();
+        const mid = String(t.managerId || '');
+        if (!mid) return;
+        if (!perManagerCreators.has(mid)) perManagerCreators.set(mid, new Set<string>());
+        const cid = String(t.creatorId || 'unknown');
+        perManagerCreators.get(mid)!.add(cid);
+      });
+      perManagerCreators.forEach((set, mid) => creatorCountsByManager.set(mid, set.size));
+    }
+
+    const prevNetByManager = new Map<string, number>();
+    (prevNetDocSnaps || []).forEach(doc => {
+      if (!doc || !doc.exists) return;
+      const data: any = doc.data();
+      // doc id is `${managerId}_${prevMonth}`; extract managerId reliably
+      const id = String(doc.id);
+      const idx = id.lastIndexOf('_');
+      const mid = idx > 0 ? id.slice(0, idx) : (data.managerId || '');
+      prevNetByManager.set(mid, Number(data.netAmount || 0));
+    });
+
     const managers: any[] = [];
     let totalRevenue = 0;
     let totalCommissions = 0; // total payout = base + milestone + extras
     let totalBonuses = 0; // milestone payouts only
     let totalBase = 0; // sum of base commissions
     let totalTransactions = 0;
-    
-    for (const doc of earningsSnapshot.docs) {
-      const data = doc.data();
-      const managerDoc = await db.collection('managers').doc(data.managerId).get();
-      const managerData = managerDoc.exists ? managerDoc.data() : {} as any;
+
+    for (const doc of earningsDocs) {
+      const data = doc.data() as any;
+      const managerId = data.managerId as string;
+      const managerData = managersMap.get(managerId) || {};
 
       const milestoneSum = data.milestonePayouts || 0;
       const extrasSum = data.extras || 0;
       const base = data.baseCommission || 0;
       const total = base + milestoneSum + extrasSum;
-      
-      // Ensure creatorCount (fallback for legacy months)
-      let creatorCount = data.creatorCount || 0;
-      if (!creatorCount) {
-        try {
-          const txSnap = await db.collection('transactions')
-            .where('month','==', month)
-            .where('managerId','==', data.managerId)
-            .get();
-          const set = new Set<string>();
-          txSnap.forEach(t => { const td:any = t.data(); set.add(td.creatorId || 'unknown'); });
-          creatorCount = set.size;
-        } catch {}
+
+      // Prefer stored creatorCount; fallback from aggregated map if missing
+      const creatorCount = data.creatorCount || creatorCountsByManager.get(managerId) || 0;
+
+      // Extras breakdown pre-aggregated
+      const extrasBreakdown = extrasByManager.get(managerId) || { recruitment: 0, graduation: 0, diamond: 0 };
+
+      // Diamond eligibility using preloaded prev month net and config threshold
+      let diamondEligible: boolean | null = null;
+      const prevNet = prevNetByManager.get(managerId) || 0;
+      if (prevNet > 0) {
+        const currentNet = data.totalNet || 0;
+        diamondEligible = currentNet >= diamondThreshold * prevNet;
       }
 
-      // Compute extras breakdown from bonuses collection (manual awards)
-      let extrasBreakdown = { recruitment: 0, graduation: 0, diamond: 0 };
-      try {
-        const extrasSnap = await db.collection('bonuses')
-          .where('managerId','==', data.managerId)
-          .where('month','==', month)
-          .get();
-        extrasSnap.forEach((bDoc:any) => {
-          const b = bDoc.data();
-          const t = String(b.type || '').toUpperCase();
-          const amt = b.amount || 0;
-          if (t === 'RECRUITMENT_BONUS') extrasBreakdown.recruitment += amt;
-          if (t === 'GRADUATION_BONUS') extrasBreakdown.graduation += amt;
-          if (t === 'DIAMOND_BONUS') extrasBreakdown.diamond += amt;
-        });
-      } catch {}
-
-      // Diamond eligibility preview (for UI badge)
-      let diamondEligible: boolean | null = null;
-      try {
-        const config = await CommissionConfigService.getInstance().getActiveConfig();
-        const threshold = config.diamondThreshold ?? 1.2;
-        const prevMonth = (() => {
-          const y = Number(month.slice(0,4));
-          const m = Number(month.slice(4));
-          const d = new Date(y, m - 2, 1);
-          return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`;
-        })();
-        const prev = await db.collection('managerMonthlyNets').doc(`${data.managerId}_${prevMonth}`).get();
-        const prevNet = prev.exists ? (prev.data()?.netAmount || 0) : 0;
-        if (prevNet > 0) {
-          const currentNet = data.totalNet || 0;
-          diamondEligible = currentNet >= threshold * prevNet;
-        }
-      } catch {}
- 
       managers.push({
-        managerId: data.managerId,
-        managerHandle: (managerData?.handle || managerData?.name || data.managerId) as string,
+        managerId: managerId,
+        managerHandle: (managerData?.handle || managerData?.name || managerId) as string,
         managerType: (managerData?.type || data.managerType || 'live').toString().toLowerCase(),
         totalGross: data.totalGross || 0,
         totalNet: data.totalNet || 0,
@@ -566,14 +627,14 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
         extrasBreakdown,
         diamondEligible,
       });
-      
+
       totalRevenue += data.totalGross || 0;
       totalCommissions += total;
       totalBonuses += milestoneSum;
       totalBase += base;
       totalTransactions += data.transactionCount || 0;
     }
-    
+
     // Safeguard: total payout must not exceed revenue (summary level)
     const cappedCommissions = Math.min(totalCommissions, totalRevenue);
 
@@ -595,6 +656,7 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
       loadTime: Date.now()
     };
     
+    res.set('Cache-Control', 'private, max-age=60');
     res.status(200).json(reportData);
     
   } catch (error) {
@@ -755,6 +817,74 @@ apiRouter.delete('/managers/accounts/:id', async (req: AuthenticatedRequest, res
     } catch (e:any) { res.status(500).json({ error: 'Failed to delete manager', details: e.message }); }
 });
 
+// Generate Auth accounts for all managers without one (Admin only)
+apiRouter.post('/managers/generate-accounts', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') { res.status(403).json({ error: 'Admin role required' }); return; }
+  try {
+    const db = admin.firestore();
+    const managersSnap = await db.collection('managers').get();
+
+    let created = 0;
+    for (const m of managersSnap.docs) {
+      const managerId = m.id;
+      const data = m.data() as any;
+      // Check if a user exists for this manager
+      const usersSnap = await db.collection('users').where('managerId', '==', managerId).limit(1).get();
+      if (!usersSnap.empty) continue;
+
+      // Prepare email and password
+      const handle = (data.handle || data.name || managerId).toString().replace(/\s+/g, '').toLowerCase();
+      const email = data.email && /@/.test(data.email) ? data.email : `${handle}@manager.com`;
+      const password = `${handle}2024!`;
+
+      // Create Auth user
+      const userRecord = await admin.auth().createUser({ email, password, displayName: data.name || handle });
+      await admin.auth().setCustomUserClaims(userRecord.uid, { role: 'MANAGER', managerId });
+
+      // Mirror in users collection
+      await db.collection('users').doc(userRecord.uid).set({
+        email,
+        role: 'manager',
+        managerId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+      created += 1;
+    }
+
+    res.status(200).json({ success: true, message: `Generated ${created} account(s)` });
+  } catch (e:any) {
+    console.error('generate-accounts failed', e);
+    res.status(500).json({ error: 'Failed to generate accounts', details: e.message });
+  }
+});
+
+// Clear all commission-related data (Admin only)
+apiRouter.delete('/managers/commission-data', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') { res.status(403).json({ error: 'Admin role required' }); return; }
+  try {
+    const db = admin.firestore();
+    const collections = ['transactions','manager-earnings','bonuses','payoutRequests','uploadBatches','batch-summaries','dashboard-updates'];
+    let totalDeleted = 0;
+    for (const col of collections) {
+      const snap = await db.collection(col).get();
+      if (snap.empty) continue;
+      const chunkSize = 450;
+      for (let i = 0; i < snap.docs.length; i += chunkSize) {
+        const chunk = snap.docs.slice(i, i + chunkSize);
+        const b = db.batch();
+        chunk.forEach(d => b.delete(d.ref));
+        await b.commit();
+        totalDeleted += chunk.length;
+      }
+    }
+    res.status(200).json({ success: true, message: `Commission data cleared (${totalDeleted} docs)` });
+  } catch (e:any) {
+    console.error('commission-data clear failed', e);
+    res.status(500).json({ error: 'Failed to clear commission data', details: e.message });
+  }
+});
+
 // --- EARNINGS & PAYOUTS ---
 apiRouter.get("/earnings/:managerId", getManagerEarnings); // Keep old route for compatibility
 apiRouter.get("/payouts/available", getAvailableEarnings);
@@ -908,6 +1038,8 @@ apiRouter.get("/genealogy/compensation", getDownlineCompensation);
 // --- MESSAGES ---
 apiRouter.get("/messages/unread-count", authMiddleware, getUnreadMessagesCount); // Get unread count first
 apiRouter.post("/messages", authMiddleware, createMessage); // Create/send message
+apiRouter.post("/messages/broadcast", authMiddleware, broadcastMessage); // Broadcast to all or selected managers
+apiRouter.get("/messages/broadcast/:broadcastId/status", authMiddleware, getBroadcastStatus); // Broadcast read status
 apiRouter.get("/messages/:userId", authMiddleware, getMessages); // Get messages for specific user (admin allowed)
 apiRouter.put("/messages/:messageId/read", authMiddleware, markMessageAsRead); // Mark message as read
 apiRouter.get("/messages", authMiddleware, getMessages); // Get all messages for authenticated user (must be last)
@@ -1118,12 +1250,13 @@ apiRouter.post('/bonuses/award', async (req: AuthenticatedRequest, res: Response
   }
   try {
     const db = admin.firestore();
-    const { managerId, period, type, description, amount } = req.body as {
+    const { managerId, period, type, description, amount, force } = req.body as {
       managerId: string;
       period?: string; // YYYYMM
       type: 'RECRUITMENT_BONUS'|'GRADUATION_BONUS'|'DIAMOND_BONUS';
       description?: string;
       amount?: number;
+      force?: boolean; // allow admin override for eligibility checks
     };
 
     if (!managerId || !type) {
@@ -1146,7 +1279,7 @@ apiRouter.post('/bonuses/award', async (req: AuthenticatedRequest, res: Response
       return;
     }
 
-    // Optional diamond eligibility check (soft-check; warn only)
+    // Enforce diamond eligibility unless force=true
     let eligibility: { ok: boolean; note?: string } = { ok: true };
     if (type === 'DIAMOND_BONUS') {
       try {
@@ -1156,8 +1289,13 @@ apiRouter.post('/bonuses/award', async (req: AuthenticatedRequest, res: Response
         const currentNet = current.exists ? (current.data()?.totalNet || 0) : 0;
         const prevNet = prev.exists ? (prev.data()?.netAmount || 0) : 0;
         const threshold = (await CommissionConfigService.getInstance().getActiveConfig()).diamondThreshold ?? 1.2;
-        if (prevNet > 0 && currentNet < threshold * prevNet) {
-          eligibility = { ok: false, note: `Current NET ${currentNet.toFixed(2)} < ${(threshold*100).toFixed(0)}% of previous NET ${prevNet.toFixed(2)}` };
+        const meets = prevNet > 0 && currentNet >= threshold * prevNet;
+        if (!meets) {
+          eligibility = { ok: false, note: prevNet <= 0 ? 'No previous NET available' : `Current NET ${currentNet.toFixed(2)} < ${(threshold*100).toFixed(0)}% of previous NET ${prevNet.toFixed(2)}` };
+        }
+        if (!eligibility.ok && !force) {
+          res.status(400).json({ error: 'Diamond eligibility not met', details: eligibility.note, code: 'DIAMOND_NOT_ELIGIBLE' });
+          return;
         }
       } catch {}
     }
@@ -1263,25 +1401,39 @@ apiRouter.delete('/bonuses/:managerId/:month/:type', async (req: AuthenticatedRe
       return;
     }
     const t = String(type || '').toUpperCase();
-    const bonusId = `${managerId}_${month}_${t}`;
-    const bonusRef = db.collection('bonuses').doc(bonusId);
-    const bonusDoc = await bonusRef.get();
-    if (!bonusDoc.exists) {
+
+    // Delete ALL matching bonus docs regardless of document ID pattern
+    const snap = await db.collection('bonuses')
+      .where('managerId','==', managerId)
+      .where('month','==', month)
+      .where('type','==', t)
+      .get();
+
+    if (snap.empty) {
       res.status(404).json({ error: 'Bonus not found' });
       return;
     }
-    const bonusAmount = bonusDoc.data()?.amount || 0;
 
-    // Delete bonus
-    await bonusRef.delete();
+    let removedAmount = 0;
+    const b = db.batch();
+    snap.docs.forEach(d => {
+      removedAmount += d.data()?.amount || 0;
+      b.delete(d.ref);
+    });
+    await b.commit();
 
-    // Recompute extras sum from remaining bonuses for that manager+month and update earnings
-    const remainingSnap = await db.collection('bonuses')
+    // Recompute extras (R+G+D) for the manager+month and update earnings
+    const remainingExtrasSnap = await db.collection('bonuses')
       .where('managerId','==', managerId)
       .where('month','==', month)
       .get();
     let newExtras = 0;
-    remainingSnap.forEach(d => { newExtras += d.data().amount || 0; });
+    remainingExtrasSnap.forEach(d => {
+      const dt = String(d.data()?.type || '').toUpperCase();
+      if (dt === 'RECRUITMENT_BONUS' || dt === 'GRADUATION_BONUS' || dt === 'DIAMOND_BONUS') {
+        newExtras += d.data()?.amount || 0;
+      }
+    });
 
     const earningsRef = db.collection('manager-earnings').doc(`${managerId}_${month}`);
     await db.runTransaction(async (tx) => {
@@ -1299,13 +1451,13 @@ apiRouter.delete('/bonuses/:managerId/:month/:type', async (req: AuthenticatedRe
         managerId,
         month,
         bonusType: t,
-        amount: bonusAmount,
+        amount: removedAmount,
         updatedExtras: newExtras,
         timestamp: admin.firestore.FieldValue.serverTimestamp()
       });
     } catch {}
 
-    res.json({ success: true, managerId, month, type: t, removedAmount: bonusAmount, extras: newExtras });
+    res.json({ success: true, managerId, month, type: t, removedAmount, extras: newExtras, removedCount: snap.size });
   } catch (e:any) {
     console.error('💥 delete bonus failed', e);
     res.status(500).json({ error: 'Failed to delete bonus', details: e.message });
@@ -1333,6 +1485,89 @@ apiRouter.get('/bonuses/eligibility/:managerId', async (req: AuthenticatedReques
     res.json({ success: true, month, threshold, currentNet, prevNet, eligible });
   } catch (e:any) {
     res.status(500).json({ error: 'Failed to check eligibility', details: e.message });
+  }
+});
+
+// Bulk cleanup: remove DIAMOND_BONUS entries that are not eligible for a given month
+apiRouter.post('/bonuses/cleanup/diamond', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: 'Admin role required' });
+    return;
+  }
+  try {
+    const db = admin.firestore();
+    const { month: bodyMonth } = (req.body || {}) as { month?: string };
+    const month = (bodyMonth && /^\d{6}$/.test(bodyMonth)) ? bodyMonth : currentMonthYYYYMM();
+    const config = await CommissionConfigService.getInstance().getActiveConfig();
+    const threshold = config.diamondThreshold ?? 1.2;
+    const prevMonth = previousMonthYYYYMM(month);
+
+    // Load all diamond bonus docs for the month
+    const diamondSnap = await db.collection('bonuses')
+      .where('month','==', month)
+      .where('type','==', 'DIAMOND_BONUS')
+      .get();
+
+    if (diamondSnap.empty) {
+      res.json({ success: true, month, removed: 0, affectedManagers: 0 });
+      return;
+    }
+
+    // Group by manager
+    const byManager = new Map<string, FirebaseFirestore.QueryDocumentSnapshot<FirebaseFirestore.DocumentData>[]>();
+    diamondSnap.docs.forEach(d => {
+      const mid = String(d.data()?.managerId || '');
+      if (!mid) return;
+      const arr = byManager.get(mid) || [];
+      arr.push(d);
+      byManager.set(mid, arr);
+    });
+
+    let removed = 0;
+    const affected: string[] = [];
+
+    for (const [managerId, docs] of byManager.entries()) {
+      // Load eligibility inputs
+      const [current, prev] = await Promise.all([
+        db.collection('manager-earnings').doc(`${managerId}_${month}`).get(),
+        db.collection('managerMonthlyNets').doc(`${managerId}_${prevMonth}`).get(),
+      ]);
+      const currentNet = current.exists ? (current.data()?.totalNet || 0) : 0;
+      const prevNet = prev.exists ? (prev.data()?.netAmount || 0) : 0;
+      const eligible = prevNet > 0 && currentNet >= threshold * prevNet;
+      if (eligible) continue;
+
+      // Delete all DIAMOND_BONUS docs for this manager+month
+      const b = db.batch();
+      docs.forEach(d => b.delete(d.ref));
+      await b.commit();
+      removed += docs.length;
+      affected.push(managerId);
+
+      // Recompute extras and update totals
+      const extrasSnap = await db.collection('bonuses')
+        .where('managerId','==', managerId)
+        .where('month','==', month)
+        .get();
+      let newExtras = 0;
+      extrasSnap.forEach(d => {
+        const t = String(d.data()?.type || '').toUpperCase();
+        if (t === 'RECRUITMENT_BONUS' || t === 'GRADUATION_BONUS' || t === 'DIAMOND_BONUS') newExtras += (d.data()?.amount || 0);
+      });
+      const earningsRef = db.collection('manager-earnings').doc(`${managerId}_${month}`);
+      await db.runTransaction(async (tx) => {
+        const e = await tx.get(earningsRef);
+        const base = e.exists ? (e.data()?.baseCommission || 0) : 0;
+        const milestones = e.exists ? (e.data()?.milestonePayouts || 0) : 0;
+        const newTotal = Math.round((base + milestones + newExtras) * 100) / 100;
+        tx.set(earningsRef, { extras: newExtras, totalEarnings: newTotal, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      });
+    }
+
+    res.json({ success: true, month, removed, affectedManagers: affected.length, managers: affected });
+  } catch (e:any) {
+    console.error('💥 diamond cleanup failed', e);
+    res.status(500).json({ error: 'Failed to cleanup diamond bonuses', details: e.message });
   }
 });
 

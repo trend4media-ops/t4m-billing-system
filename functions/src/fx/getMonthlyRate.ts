@@ -17,6 +17,42 @@ function toAsOfDate(month: string): string {
   return `${year}-${mm}-06`;
 }
 
+async function fetchWithTimeout(url: string, timeoutMs = 10000): Promise<Response> {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    // @ts-ignore Node 20 global fetch
+    const resp = await fetch(url, { signal: controller.signal });
+    return resp as unknown as Response;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function getUsdToEurFromPrimary(asOfDate: string): Promise<{ rate: number; source: string } | null> {
+  // exchangerate.host (no key)
+  const url = `https://api.exchangerate.host/${asOfDate}?base=USD&symbols=EUR`;
+  // @ts-ignore Response type compatible at runtime
+  const r = await fetchWithTimeout(url).catch(() => null as any);
+  if (!r || !(r as any).ok) return null;
+  const json = await (r as any).json().catch(() => null);
+  const rate = json?.rates?.EUR;
+  if (typeof rate !== 'number' || !isFinite(rate)) return null;
+  return { rate: Math.round(rate * 1e6) / 1e6, source: 'exchangerate.host' };
+}
+
+async function getUsdToEurFromFallback(asOfDate: string): Promise<{ rate: number; source: string } | null> {
+  // Frankfurter (ECB). If date is weekend/holiday, returns previous business day's rate
+  const url = `https://api.frankfurter.app/${asOfDate}?from=USD&to=EUR`;
+  // @ts-ignore Response type compatible at runtime
+  const r = await fetchWithTimeout(url).catch(() => null as any);
+  if (!r || !(r as any).ok) return null;
+  const json = await (r as any).json().catch(() => null);
+  const rate = json?.rates?.EUR;
+  if (typeof rate !== 'number' || !isFinite(rate)) return null;
+  return { rate: Math.round(rate * 1e6) / 1e6, source: 'frankfurter.app' };
+}
+
 export async function getMonthlyFxRate(
   req: AuthenticatedRequest,
   res: Response
@@ -39,26 +75,20 @@ export async function getMonthlyFxRate(
 
     const asOfDate = toAsOfDate(month);
 
-    // Fetch historical rate for asOfDate from exchangerate.host (no API key)
-    // Example: https://api.exchangerate.host/2025-07-06?base=USD&symbols=EUR
-    const url = `https://api.exchangerate.host/${asOfDate}?base=USD&symbols=EUR`;
-    const r = await fetch(url);
-    if (!r.ok) {
-      res.status(502).json({ error: "Failed fetching FX rate", details: await r.text() });
-      return;
-    }
-    const json = await r.json();
-    const usdToEur = json?.rates?.EUR;
-    if (typeof usdToEur !== 'number' || !isFinite(usdToEur)) {
-      res.status(502).json({ error: "Invalid FX rate response" });
+    // Try primary provider, then fallback
+    const primary = await getUsdToEurFromPrimary(asOfDate);
+    const chosen = primary ?? (await getUsdToEurFromFallback(asOfDate));
+
+    if (!chosen) {
+      res.status(502).json({ error: "Failed fetching FX rate from providers" });
       return;
     }
 
     const doc: FxRateDoc = {
       month,
       asOfDate,
-      usdToEur: Math.round(usdToEur * 1e6) / 1e6, // 6 decimals
-      source: 'exchangerate.host',
+      usdToEur: chosen.rate,
+      source: chosen.source,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     };
     await ref.set(doc);
