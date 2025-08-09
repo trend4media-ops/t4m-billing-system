@@ -1412,7 +1412,7 @@ apiRouter.get('/bonuses/overview', async (req: AuthenticatedRequest, res: Respon
         (item as any).diamondEligible = false;
       }
 
-      // Recompute total from components to ensure consistency
+      // Recompute total (R+G+D only) to align with UI
       item.total = Math.round((item.recruitment + item.graduation + item.diamond) * 100) / 100;
     }));
 

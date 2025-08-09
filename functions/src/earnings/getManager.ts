@@ -142,13 +142,13 @@ export async function getManagerEarnings(
           recruitmentBonus += amount;
           break;
         case "DOWNLINE_LEVEL_A":
-          downlineIncome.levelA += amount;
+          if (b.baseSource === 'BASE_COMMISSION') downlineIncome.levelA += amount;
           break;
         case "DOWNLINE_LEVEL_B":
-          downlineIncome.levelB += amount;
+          if (b.baseSource === 'BASE_COMMISSION') downlineIncome.levelB += amount;
           break;
         case "DOWNLINE_LEVEL_C":
-          downlineIncome.levelC += amount;
+          if (b.baseSource === 'BASE_COMMISSION') downlineIncome.levelC += amount;
           break;
       }
     });

@@ -1,6 +1,7 @@
 import * as admin from "firebase-admin";
 import { Response } from "express";
 import { AuthenticatedRequest } from "../middleware/auth";
+import { CommissionConfigService } from "../services/commissionConfig";
 
 export const getAllManagerEarnings = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     if (req.user?.role !== 'ADMIN') {
@@ -16,6 +17,14 @@ export const getAllManagerEarnings = async (req: AuthenticatedRequest, res: Resp
 
     try {
         const db = admin.firestore();
+        const config = await CommissionConfigService.getInstance().getActiveConfig();
+        const threshold = config.diamondThreshold ?? 1.2;
+        const prevMonth = (() => {
+            const y = Number(month.slice(0,4));
+            const m = Number(month.slice(4));
+            const d = new Date(y, m - 2, 1);
+            return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`;
+        })();
         
         // Get manager earnings for the month
         const earningsSnapshot = await db.collection("manager-earnings")
@@ -66,8 +75,19 @@ export const getAllManagerEarnings = async (req: AuthenticatedRequest, res: Resp
                 diamondBonus: 0,
                 recruitmentBonus: 0,
                 downlineIncome: { levelA: 0, levelB: 0, levelC: 0 },
+                diamondEligible: false as boolean | null,
             };
             
+            // Determine diamond eligibility up-front using stored totals
+            try {
+                const prevNetDoc = await db.collection('managerMonthlyNets').doc(`${managerId}_${prevMonth}`).get();
+                const prevNet = prevNetDoc.exists ? (prevNetDoc.data()?.netAmount || 0) : 0;
+                const currentNet = earningsData.totalNet || 0;
+                bonusBreakdown.diamondEligible = prevNet > 0 ? (currentNet >= threshold * prevNet) : false;
+            } catch {
+                bonusBreakdown.diamondEligible = null;
+            }
+
             bonusesSnapshot.forEach(bonusDoc => {
                 const bonus = bonusDoc.data();
                 const amount = bonus.amount || 0;
@@ -89,19 +109,22 @@ export const getAllManagerEarnings = async (req: AuthenticatedRequest, res: Resp
                         bonusBreakdown.graduationBonus += amount;
                         break;
                     case "DIAMOND_BONUS":
-                        bonusBreakdown.diamondBonus += amount;
+                        // Only count diamond if eligibility is met
+                        if (bonusBreakdown.diamondEligible) {
+                            bonusBreakdown.diamondBonus += amount;
+                        }
                         break;
                     case "RECRUITMENT_BONUS":
                         bonusBreakdown.recruitmentBonus += amount;
                         break;
                     case "DOWNLINE_LEVEL_A":
-                        bonusBreakdown.downlineIncome.levelA += amount;
+                        if (bonus.baseSource === 'BASE_COMMISSION') bonusBreakdown.downlineIncome.levelA += amount;
                         break;
                     case "DOWNLINE_LEVEL_B":
-                        bonusBreakdown.downlineIncome.levelB += amount;
+                        if (bonus.baseSource === 'BASE_COMMISSION') bonusBreakdown.downlineIncome.levelB += amount;
                         break;
                     case "DOWNLINE_LEVEL_C":
-                        bonusBreakdown.downlineIncome.levelC += amount;
+                        if (bonus.baseSource === 'BASE_COMMISSION') bonusBreakdown.downlineIncome.levelC += amount;
                         break;
                 }
             });

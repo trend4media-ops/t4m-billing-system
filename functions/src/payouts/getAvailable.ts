@@ -67,9 +67,9 @@ export async function getAvailableEarnings(
         case 'DIAMOND_BONUS': diamond += amount; break; // EUR-native
         case 'GRADUATION_BONUS': graduation += amount; break;
         case 'RECRUITMENT_BONUS': recruitment += amount; break;
-        case 'DOWNLINE_LEVEL_A': downA += amount; break; // EUR-native
-        case 'DOWNLINE_LEVEL_B': downB += amount; break;
-        case 'DOWNLINE_LEVEL_C': downC += amount; break;
+        case 'DOWNLINE_LEVEL_A': if (b.baseSource === 'BASE_COMMISSION') downA += amount; break; // Only new-style downline
+        case 'DOWNLINE_LEVEL_B': if (b.baseSource === 'BASE_COMMISSION') downB += amount; break;
+        case 'DOWNLINE_LEVEL_C': if (b.baseSource === 'BASE_COMMISSION') downC += amount; break;
       }
     });
 

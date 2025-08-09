@@ -20,11 +20,16 @@ if ! command -v firebase &> /dev/null; then
     npm install -g firebase-tools
 fi
 
-# Login check
-echo -e "${BLUE}🔐 Checking Firebase authentication...${NC}"
-if ! firebase projects:list &> /dev/null; then
-    echo -e "${YELLOW}⚠️  Please login to Firebase first${NC}"
-    firebase login
+# Prefer service-account auth if GOOGLE_APPLICATION_CREDENTIALS is set
+if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS}" && -f "${GOOGLE_APPLICATION_CREDENTIALS}" ]]; then
+  echo -e "${BLUE}🔐 Using service account for non-interactive deploy...${NC}"
+else
+  echo -e "${YELLOW}⚠️  GOOGLE_APPLICATION_CREDENTIALS not set. Using interactive login if needed.${NC}"
+  echo -e "${BLUE}🔐 Checking Firebase authentication...${NC}"
+  if ! firebase projects:list &> /dev/null; then
+      echo -e "${YELLOW}⚠️  Please login to Firebase first${NC}"
+      firebase login
+  fi
 fi
 
 # Install Functions dependencies
@@ -43,10 +48,10 @@ cd ..
 
 # Deploy to Firebase
 echo -e "${GREEN}🚀 Deploying to Firebase...${NC}"
-firebase deploy
+firebase deploy -P miregal --only hosting,functions
 
 echo -e "${GREEN}✅ Firebase Deployment Complete!${NC}"
-echo -e "${BLUE}📱 Your app is live at: https://your-project.web.app${NC}"
+echo -e "${BLUE}📱 Your app is live at: https://trend4media-billing.web.app${NC}"
 echo -e "${YELLOW}🔧 Configure your project ID in firebase.json if needed${NC}"
 
 # Show helpful commands
