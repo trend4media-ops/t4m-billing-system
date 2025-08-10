@@ -16,12 +16,12 @@
 - **Column K (10)**: Valid days(d)
 - **Column L (11)**: LIVE duration(h)
 - **Column M (12)**: Estimated bonus (Gross Amount in €)
-- **Column N (13)**: Estimated bonus - Rookie milestone 1 bonus task
-- **Column O (14)**: Estimated bonus - Rookie milestone 2 bonus task
-- **Column P (15)**: Estimated bonus - Rookie milestone 1 retention bonus task
-- **Column Q (16)**: Estimated bonus - Activeness task task
-- **Column R (17)**: Estimated bonus - Incremental revenue task task
-- **Column S (18)**: Estimated bonus - Rookie half-milestone bonus task
+- **Column N (13)**: Estimated bonus - Rookie half-milestone bonus task (was S)
+- **Column O (14)**: Estimated bonus - Rookie milestone 1 bonus task (was N)
+- **Column P (15)**: Estimated bonus - Rookie milestone 1 retention bonus task (unchanged)
+- **Column Q (16)**: Estimated bonus - Rookie milestone 2 bonus task (was O)
+- **Column R (17)**: Estimated bonus - Activeness task task
+- **Column S (18)**: (no longer used for milestones in new format)
 
 ## Key Points for Processing:
 1. **Manager Identification**: 
@@ -47,9 +47,9 @@ const managerName = row[4] || row[6]; // Live or Team manager
 const managerType = row[4] ? 'live' : 'team';
 const grossAmount = parseFloat(row[12]);
 const milestones = {
-  N: row[13],
-  O: row[14],
-  P: row[15],
-  S: row[18]
+  S: row[13], // moved from 18
+  N: row[14], // moved from 13
+  O: row[16], // moved from 14
+  P: row[15]  // unchanged
 };
 ``` 

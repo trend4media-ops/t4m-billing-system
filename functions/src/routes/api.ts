@@ -461,8 +461,15 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
     const { month } = req.params;
     const db = admin.firestore();
     
-    // If there are no batches at all for this month, return empty to avoid stale data
-    const anyBatchesSnap = await db.collection('uploadBatches').where('month', '==', month).limit(1).get();
+    // Always return fresh results to avoid stale dashboard tiles
+    res.set('Cache-Control', 'no-store, max-age=0, must-revalidate');
+    
+    // If there are no ACTIVE batches for this month, return empty to avoid stale data
+    const anyBatchesSnap = await db.collection('uploadBatches')
+      .where('month', '==', month)
+      .where('active', '==', true)
+      .limit(1)
+      .get();
     if (anyBatchesSnap.empty) {
       res.status(200).json({
         success: true,
@@ -537,6 +544,7 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
     (managerDocSnaps || []).forEach(doc => { if (doc && doc.exists) managersMap.set(doc.id, doc.data()); });
 
     const extrasByManager = new Map<string, { recruitment: number; graduation: number; diamond: number }>();
+    const downlineByManager = new Map<string, { a: number; b: number; c: number; total: number }>();
     if (bonusesSnap) {
       bonusesSnap.forEach((bDoc: any) => {
         const b = bDoc.data();
@@ -545,10 +553,24 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
         const entry = extrasByManager.get(mid) || { recruitment: 0, graduation: 0, diamond: 0 };
         const t = String(b.type || '').toUpperCase();
         const amt = b.amount || 0;
-        if (t === 'RECRUITMENT_BONUS') entry.recruitment += amt;
-        if (t === 'GRADUATION_BONUS') entry.graduation += amt;
-        if (t === 'DIAMOND_BONUS') entry.diamond += amt;
-        extrasByManager.set(mid, entry);
+        // Only include manual extras; ignore any AUTO_MILESTONE or other types
+        const isManual = String(b.awardMethod || '').toUpperCase() === 'MANUAL' || /^\w+_\d{6}_(RECRUITMENT_BONUS|GRADUATION_BONUS|DIAMOND_BONUS)$/.test(bDoc.id);
+        if (isManual) {
+          if (t === 'RECRUITMENT_BONUS') entry.recruitment += amt;
+          if (t === 'GRADUATION_BONUS') entry.graduation += amt;
+          if (t === 'DIAMOND_BONUS') entry.diamond += amt;
+          extrasByManager.set(mid, entry);
+        }
+
+        // Accumulate downline regardless of MANUAL
+        if (t === 'DOWNLINE_LEVEL_A' || t === 'DOWNLINE_LEVEL_B' || t === 'DOWNLINE_LEVEL_C') {
+          const d = downlineByManager.get(mid) || { a: 0, b: 0, c: 0, total: 0 };
+          if (t === 'DOWNLINE_LEVEL_A') d.a += amt;
+          if (t === 'DOWNLINE_LEVEL_B') d.b += amt;
+          if (t === 'DOWNLINE_LEVEL_C') d.c += amt;
+          d.total += amt;
+          downlineByManager.set(mid, d);
+        }
       });
     }
 
@@ -591,8 +613,9 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
 
       const milestoneSum = data.milestonePayouts || 0;
       const extrasSum = data.extras || 0;
+      const downlineSum = (downlineByManager.get(managerId)?.total || 0) || (data.downlineEarnings || 0);
       const base = data.baseCommission || 0;
-      const total = base + milestoneSum + extrasSum;
+      const total = base + milestoneSum + extrasSum + downlineSum;
 
       // Prefer stored creatorCount; fallback from aggregated map if missing
       const creatorCount = data.creatorCount || creatorCountsByManager.get(managerId) || 0;
@@ -618,7 +641,7 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
         totalBonuses: milestoneSum, // milestone payouts only (for column)
         transactionCount: data.transactionCount || 0,
         creatorCount: creatorCount,
-        downlineEarnings: data.downlineEarnings || 0,
+        downlineEarnings: downlineSum,
         processingDate: data.calculatedAt ? data.calculatedAt.toDate().toISOString() : new Date().toISOString(),
         month: month,
         batchId: data.batchId || preferredBatchId || 'unknown',
@@ -656,7 +679,6 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
       loadTime: Date.now()
     };
     
-    res.set('Cache-Control', 'private, max-age=60');
     res.status(200).json(reportData);
     
   } catch (error) {

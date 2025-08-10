@@ -133,13 +133,23 @@ export async function getManagerEarnings(
           milestoneInternal.retention += amount;
           break;
         case "GRADUATION_BONUS":
-          graduationBonus += amount;
+          // Only count if manual award or deterministic id `${managerId}_${period}_GRADUATION_BONUS`
+          if (!period) { break; }
+          if ((String(b.awardMethod||'').toUpperCase()==='MANUAL') || (doc.id === `${managerId}_${period}_GRADUATION_BONUS`)) {
+            graduationBonus += amount;
+          }
           break;
         case "DIAMOND_BONUS":
-          diamondBonus += amount;
+          if (!period) { break; }
+          if ((String(b.awardMethod||'').toUpperCase()==='MANUAL') || (doc.id === `${managerId}_${period}_DIAMOND_BONUS`)) {
+            diamondBonus += amount;
+          }
           break;
         case "RECRUITMENT_BONUS":
-          recruitmentBonus += amount;
+          if (!period) { break; }
+          if ((String(b.awardMethod||'').toUpperCase()==='MANUAL') || (doc.id === `${managerId}_${period}_RECRUITMENT_BONUS`)) {
+            recruitmentBonus += amount;
+          }
           break;
         case "DOWNLINE_LEVEL_A":
           if (b.baseSource === 'BASE_COMMISSION') downlineIncome.levelA += amount;
