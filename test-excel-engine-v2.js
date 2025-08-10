@@ -89,18 +89,20 @@ function calculateCommission(grossAmount, hasS, hasN, hasO, hasP, role) {
 }
 
 try {
-  // Read Excel file - use the first available xlsx file
-  let excelFile = 'Neu_Task_202506_UTC+0_2025_07_29_22_14_15.xlsx';
-  const xlsxFiles = fs.readdirSync('.').filter(f => f.endsWith('.xlsx'));
-  console.log(`📁 Available xlsx files: ${xlsxFiles.join(', ')}`);
-  
-  if (xlsxFiles.length === 0) {
-    console.error(`❌ No xlsx files found in directory`);
-    process.exit(1);
+  // Read Excel file - accept CLI arg; else scan local folder
+  let excelFile = process.argv[2];
+  if (!excelFile) {
+    const xlsxFiles = fs.readdirSync('.').filter(f => f.endsWith('.xlsx'));
+    console.log(`📁 Available xlsx files: ${xlsxFiles.join(', ')}`);
+    if (xlsxFiles.length === 0) {
+      console.error(`❌ No xlsx files found in directory`);
+      process.exit(1);
+    }
+    // Prefer new format Task_202507*, then Neu_Task_202506*, otherwise first
+    excelFile = xlsxFiles.find(f => f.startsWith('Task_202507'))
+            || xlsxFiles.find(f => f.startsWith('Neu_Task_202506'))
+            || xlsxFiles[0];
   }
-  
-  // Use the file that starts with 'Neu_Task_202506' or the first one
-  excelFile = xlsxFiles.find(f => f.startsWith('Neu_Task_202506')) || xlsxFiles[0];
   console.log(`📁 Using Excel file: ${excelFile}`);
   
   if (!fs.existsSync(excelFile)) {
@@ -146,10 +148,11 @@ try {
     // Column M (Index 12) = Gross
     const grossAmount = parseFloat(row[12]) || 0;
     
-    // Check milestone columns - CORRECTED LOGIC: Only specific values count as achieved
-    const hasS = row[18] === '150' || row[18] === 150;
-    const hasN = row[13] === '300' || row[13] === 300;
-    const hasO = row[14] === '1000' || row[14] === 1000;
+    // Check milestone columns (NEW ORDER)
+    // S: now column N (13), N: now column O (14), O: now column Q (16), P: column P (15)
+    const hasS = row[13] === '150' || row[13] === 150;
+    const hasN = row[14] === '300' || row[14] === 300;
+    const hasO = row[16] === '1000' || row[16] === 1000;
     const hasP = row[15] === '240' || row[15] === 240;
     
     console.log(`Creator: ${creatorName} (${handle})`);
@@ -195,15 +198,15 @@ try {
   let managerStats = {};
   
   jsonData.forEach(row => {
-    if (row && row.length >= 19) {
+    if (row && row.length >= 17) {
       totalRows++;
       const gross = parseFloat(row[12]) || 0;
       totalGross += gross;
       
-      // CORRECTED: Only count specific achievement values
-      if (row[18] === '150' || row[18] === 150) milestoneCounts.S++;
-      if (row[13] === '300' || row[13] === 300) milestoneCounts.N++;
-      if (row[14] === '1000' || row[14] === 1000) milestoneCounts.O++;
+      // NEW ORDER: Only count specific achievement values
+      if (row[13] === '150' || row[13] === 150) milestoneCounts.S++;
+      if (row[14] === '300' || row[14] === 300) milestoneCounts.N++;
+      if (row[16] === '1000' || row[16] === 1000) milestoneCounts.O++;
       if (row[15] === '240' || row[15] === 240) milestoneCounts.P++;
       
       // Track managers
