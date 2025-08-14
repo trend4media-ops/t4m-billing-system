@@ -244,7 +244,15 @@ async function ensureManagersExist(rows: any[][], uploadDocRef?: admin.firestore
     } else {
       // Create new manager with handle and name
       const managerId = firestore.collection('managers').doc().id;
-      const email = managerData.email || `${managerData.name.toLowerCase().replace(/\s+/g, '.')}@trend4media.com`;
+
+      // Standardize credentials
+      const baseHandle = (managerData.name || managerId).toString();
+      const cleanHandle = baseHandle.replace(/\s+/g, '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+      const defaultEmailBase = `${cleanHandle}@trend4media.com`;
+      let resolvedEmail = (managerData.email && /@/.test(managerData.email)) ? String(managerData.email).trim() : defaultEmailBase;
+      const defaultPassword = `manager123`;
+
+      // Create Firestore manager doc (basic fields). Email will be merged after auth creation below
       batch.set(firestore.collection('managers').doc(managerId), {
         name: managerData.name,
         handle: managerData.name,
@@ -258,13 +266,58 @@ async function ensureManagersExist(rows: any[][], uploadDocRef?: admin.firestore
       });
       managerMap.set(canonicalHandle, managerId);
       newManagersCount++;
-      // Create auth user account (async, don't wait)
-      admin.auth().createUser({
-        uid: managerId,
-        email: email,
-        password: 'TempPassword123!',
-        displayName: managerData.name
-      }).catch(() => {});
+
+      // Create auth user account and mirror to users collection; handle email collisions
+      (async () => {
+        let createdUid: string | null = null;
+        let emailCandidate = resolvedEmail;
+        for (let attempt = 0; attempt < 5; attempt++) {
+          try {
+            const userRecord = await admin.auth().createUser({
+              email: emailCandidate,
+              password: defaultPassword,
+              displayName: managerData.name,
+            });
+            createdUid = userRecord.uid;
+            resolvedEmail = emailCandidate;
+            break;
+          } catch (err: any) {
+            if (err && err.code === 'auth/email-already-exists') {
+              // Try a new candidate email
+              emailCandidate = `${cleanHandle}${attempt + 1}@manager.com`;
+              continue;
+            }
+            console.warn(`⚠️ Failed to create auth user for ${managerData.name}:`, err?.message || err);
+            break;
+          }
+        }
+
+        if (createdUid) {
+          try {
+            await admin.auth().setCustomUserClaims(createdUid, { role: 'MANAGER', managerId });
+          } catch (e) {
+            console.warn(`⚠️ Failed setting claims for ${createdUid}`, e);
+          }
+          try {
+            await firestore.collection('users').doc(createdUid).set({
+              email: resolvedEmail,
+              role: 'manager',
+              managerId,
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+          } catch (e) {
+            console.warn(`⚠️ Failed writing users doc for ${createdUid}`, e);
+          }
+          try {
+            await firestore.collection('managers').doc(managerId).set({
+              email: resolvedEmail,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+          } catch (e) {
+            console.warn(`⚠️ Failed updating manager email for ${managerId}`, e);
+          }
+        }
+      })().catch(() => {});
     }
   }
   

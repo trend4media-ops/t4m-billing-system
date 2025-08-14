@@ -15,7 +15,7 @@ export async function requestPayout(
   res: Response
 ): Promise<void> {
   try {
-    if (!req.user || (req.user.role !== "MANAGER" && req.user.role !== "manager")) {
+    if (!req.user || (String(req.user.role).toUpperCase() !== "MANAGER")) {
       res.status(403).json({ error: "Access denied. Manager role required." });
       return;
     }
@@ -57,10 +57,12 @@ export async function requestPayout(
       .collection("payoutRequests")
       .where("managerId", "==", managerId)
       .where("period", "==", period)
-      .where("status", "in", ["SUBMITTED", "APPROVED", "IN_PROGRESS", "PAID"]) // exclude REJECTED
       .get();
 
-    const alreadyRequested = existingRequestsSnapshot.docs.reduce((sum, d) => sum + (d.data().amount || d.data().requestedAmount || 0), 0);
+    const alreadyRequested = existingRequestsSnapshot.docs
+      .map(d => d.data())
+      .filter(d => (d.status || 'SUBMITTED') !== 'REJECTED')
+      .reduce((sum, d:any) => sum + (d.amount || d.requestedAmount || 0), 0);
 
     const netAvailable = Math.max(0, totalEarnings - alreadyRequested);
     if (requested > netAvailable) {
@@ -87,11 +89,15 @@ export async function requestPayout(
       status: "SUBMITTED",
       bankDetails: bankDetails || "",
       notes: notes || "",
+      // Currency metadata for clarity
+      currency: 'EUR',
+      amountEUR: requested,
+      fxRateOnRequest: null,
       requestedAt: admin.firestore.FieldValue.serverTimestamp(),
       history: [
         {
           status: "SUBMITTED",
-          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          timestamp: admin.firestore.Timestamp.now(),
           actor: "MANAGER",
           userId: uid,
         }

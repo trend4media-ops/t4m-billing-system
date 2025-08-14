@@ -29,7 +29,9 @@ import {
 } from "../genealogy/genealogy";
 import { CommissionConfigService } from "../services/commissionConfig";
 import { getMonthlyFxRate } from "../fx/getMonthlyRate";
-import { getProfile, changePassword, changeEmail, updateBank, adminUpdateManagerCredentials, adminUpdateManagerBank } from "../auth/profile";
+import { getProfile, changePassword, changeEmail, updateBank, adminUpdateManagerCredentials, adminUpdateManagerBank, adminResetManagerPassword } from "../auth/profile";
+import { getEarningsHistory } from "../managers/getEarningsHistory";
+import { getAvailableMonths } from "../managers/getAvailableMonths";
 
 const apiRouter = Router();
 
@@ -76,6 +78,7 @@ apiRouter.put('/managers/me/bank', updateBank);
 // Admin variants
 apiRouter.put('/admin/managers/:managerId/credentials', adminUpdateManagerCredentials);
 apiRouter.put('/admin/managers/:managerId/bank', adminUpdateManagerBank);
+apiRouter.post('/admin/managers/:managerId/reset-password', adminResetManagerPassword);
 
 // --- FX RATES ---
 apiRouter.get('/fx/monthly', getMonthlyFxRate);
@@ -730,6 +733,8 @@ apiRouter.get("/duplicates", async (req: AuthenticatedRequest, res: Response): P
 apiRouter.get("/managers", getManagers);
 apiRouter.get("/managers/earnings-v2", getAllManagerEarnings);
 apiRouter.get("/managers/:managerId/earnings-v2", getManagerEarnings); // Add missing route with v2 endpoint
+apiRouter.get("/managers/:managerId/earnings-history", getEarningsHistory);
+apiRouter.get("/managers/:managerId/months", getAvailableMonths);
 apiRouter.get("/managers/:managerId/performance", getManagerPerformance);
 apiRouter.get("/managers/:managerId/team", getTeamPerformance);
 
@@ -856,8 +861,8 @@ apiRouter.post('/managers/generate-accounts', async (req: AuthenticatedRequest, 
 
       // Prepare email and password
       const handle = (data.handle || data.name || managerId).toString().replace(/\s+/g, '').toLowerCase();
-      const email = data.email && /@/.test(data.email) ? data.email : `${handle}@manager.com`;
-      const password = `${handle}2024!`;
+      const email = data.email && /@/.test(data.email) ? data.email : `${handle}@trend4media.com`;
+      const password = `manager123`;
 
       // Create Auth user
       const userRecord = await admin.auth().createUser({ email, password, displayName: data.name || handle });
@@ -945,7 +950,8 @@ apiRouter.get("/payouts", async (req: AuthenticatedRequest, res: Response): Prom
       })
       .map((p:any) => ({
         ...p,
-        requestedAt: p.requestedAt?.toDate ? p.requestedAt.toDate().toISOString() : (p.requestedAt || null)
+        requestedAt: p.requestedAt?.toDate ? p.requestedAt.toDate().toISOString() : (p.requestedAt || null),
+        processedAt: p.processedAt?.toDate ? p.processedAt.toDate().toISOString() : (p.processedAt || null)
       }));
 
     res.status(200).json({ data: payouts });
@@ -987,7 +993,7 @@ apiRouter.put("/payouts/:id/status", async (req: AuthenticatedRequest, res: Resp
     if (adminNotes) updateData.adminNotes = adminNotes;
     updateData.history = admin.firestore.FieldValue.arrayUnion({
       status,
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      timestamp: admin.firestore.Timestamp.now(),
       actor: 'ADMIN',
       userId: req.user!.uid,
       adminNotes: adminNotes || ''
@@ -999,6 +1005,30 @@ apiRouter.put("/payouts/:id/status", async (req: AuthenticatedRequest, res: Resp
   } catch (error) {
     console.error('💥 Error updating payout status:', error);
     res.status(500).json({ error: 'Failed to update payout status' });
+  }
+});
+
+// Admin: delete payout request
+apiRouter.delete("/payouts/:id", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: "Access Denied: Admin role required." });
+    return;
+  }
+  try {
+    const { id } = req.params;
+    const db = admin.firestore();
+    const ref = db.collection('payoutRequests').doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      res.status(404).json({ error: 'Payout request not found' });
+      return;
+    }
+    const before = snap.data() || {};
+    await ref.delete();
+    res.status(200).json({ success: true, id, managerId: before.managerId || null, period: before.period || null });
+  } catch (error) {
+    console.error('💥 Error deleting payout:', error);
+    res.status(500).json({ error: 'Failed to delete payout request' });
   }
 });
 
@@ -1026,7 +1056,8 @@ apiRouter.get("/payouts/history", async (req: AuthenticatedRequest, res: Respons
       })
       .map((p:any) => ({
         ...p,
-        requestedAt: p.requestedAt?.toDate ? p.requestedAt.toDate().toISOString() : (p.requestedAt || null)
+        requestedAt: p.requestedAt?.toDate ? p.requestedAt.toDate().toISOString() : (p.requestedAt || null),
+        processedAt: p.processedAt?.toDate ? p.processedAt.toDate().toISOString() : (p.processedAt || null)
       }));
 
     res.status(200).json({ success: true, data: items });
