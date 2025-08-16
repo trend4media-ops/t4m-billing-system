@@ -377,6 +377,16 @@ async function updateManagerEarnings(batchId: string, month: string): Promise<vo
       downlineEarnings?: number,
   }>();
   const managerCreators = new Map<string, Set<string>>();
+  // Aggregate per-creator per-manager revenue for this month (for all-time collection)
+  const creatorAggByManager = new Map<string, {
+      creatorId: string;
+      managerId: string;
+      creatorHandle: string;
+      gross: number;
+      net: number;
+      base: number;
+      count: number;
+  }>();
   
   // Process transactions
   transactionsSnapshot.forEach(doc => {
@@ -409,6 +419,24 @@ async function updateManagerEarnings(batchId: string, month: string): Promise<vo
       const creatorId = (data.creatorId || data.creator || 'unknown') as string;
       if (!managerCreators.has(managerId)) managerCreators.set(managerId, new Set<string>());
       managerCreators.get(managerId)!.add(creatorId);
+
+      // Aggregate creator-month revenue per manager for all-time storage
+      const creatorHandle = String(data.creatorHandle || 'unknown');
+      const key = `${creatorId}__${managerId}`;
+      const current = creatorAggByManager.get(key) || {
+        creatorId,
+        managerId,
+        creatorHandle,
+        gross: 0,
+        net: 0,
+        base: 0,
+        count: 0,
+      };
+      current.gross += (data.grossAmount || 0);
+      current.net += (data.netForCommission || 0);
+      current.base += (data.baseCommission || 0);
+      current.count += 1;
+      creatorAggByManager.set(key, current);
   });
 
   // Process bonuses
@@ -549,6 +577,73 @@ async function updateManagerEarnings(batchId: string, month: string): Promise<vo
     });
   } catch (e) {
     console.warn('⚠️ Failed to write batch summary or dashboard update', e);
+  }
+
+  // Persist All-Time revenue snapshots in separate collections to avoid impacting existing system
+  try {
+    const writes: Array<{ ref: FirebaseFirestore.DocumentReference; data: any }> = [];
+
+    // Manager all-time revenue per month
+    for (const [managerId, earningsRaw] of managerEarnings) {
+      const earnings: any = earningsRaw as any;
+      const ref = firestore.collection('alltime-manager-revenue').doc(`${managerId}_${month}`);
+      const totalEarnings = (earnings.baseCommission || 0) + (earnings.milestoneSum || 0) + (earnings.extrasSum || 0) + (earnings.downlineEarnings || 0);
+      writes.push({
+        ref,
+        data: {
+          managerId,
+          month,
+          totalGross: earnings.totalGross || 0,
+          totalNet: earnings.totalNet || 0,
+          baseCommission: earnings.baseCommission || 0,
+          milestonePayouts: earnings.milestoneSum || 0,
+          extras: earnings.extrasSum || 0,
+          downlineEarnings: earnings.downlineEarnings || 0,
+          totalEarnings,
+          transactionCount: earnings.transactionCount || 0,
+          creatorCount: (managerCreators.get(managerId)?.size || 0),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }
+      });
+    }
+
+    // Creator all-time revenue per month (by manager)
+    for (const agg of creatorAggByManager.values()) {
+      const ref = firestore.collection('alltime-creator-revenue').doc(`${agg.creatorId}_${agg.managerId}_${month}`);
+      writes.push({
+        ref,
+        data: {
+          creatorId: agg.creatorId,
+          creatorHandle: agg.creatorHandle,
+          managerId: agg.managerId,
+          month,
+          grossAmount: Math.round(agg.gross * 100) / 100,
+          netAmount: Math.round(agg.net * 100) / 100,
+          baseCommission: Math.round(agg.base * 100) / 100,
+          transactionCount: agg.count,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }
+      });
+    }
+
+    // Commit writes in chunks to respect Firestore limits
+    let currentBatch = firestore.batch();
+    let ops = 0;
+    for (const w of writes) {
+      currentBatch.set(w.ref, w.data, { merge: true });
+      ops += 1;
+      if (ops >= 400) {
+        await currentBatch.commit();
+        currentBatch = firestore.batch();
+        ops = 0;
+      }
+    }
+    if (ops > 0) {
+      await currentBatch.commit();
+    }
+    console.log(`✅ All-Time snapshots written: managers=${managerEarnings.size}, creatorsPairs=${creatorAggByManager.size}`);
+  } catch (e) {
+    console.warn('⚠️ Failed to write All-Time snapshots', e);
   }
 }
 

@@ -16,6 +16,7 @@ interface AvailableEarnings {
     usdDerivedBasePlusMilestonesEUR: number;
     euroExtrasTotal: number; // EUR (Diamond, Graduation, Recruitment)
     euroDownlineTotal: number; // EUR
+    manualAdjustmentsTotal?: number;
   };
   totalUSD?: number; // New: full USD basis before conversion
   totalEUR?: number; // New: converted amount using fx
@@ -107,8 +108,16 @@ export async function getAvailableEarnings(
     const euroExtrasTotal = Math.round((diamond + graduation + recruitment) * 100) / 100;
     const euroDownlineTotal = Math.round((downA + downB + downC) * 100) / 100;
 
-    const totalUSD = Math.round((usdDerivedBasePlusMilestonesUSD + (euroExtrasTotal + euroDownlineTotal) / usdToEur) * 100) / 100; // reflect complete USD basis for UI if needed
-    const dynamicTotalEUR = Math.round((usdDerivedBasePlusMilestonesEUR + euroExtrasTotal + euroDownlineTotal) * 100) / 100;
+    // Manual admin adjustments for this manager and month (EUR-native)
+    const adjustmentsSnap = await db.collection('manualAdjustments')
+      .where('managerId','==', managerId)
+      .where('month','==', period)
+      .get();
+    let manualAdjustmentsTotal = 0;
+    adjustmentsSnap.forEach(doc => { manualAdjustmentsTotal += (doc.data()?.amount || 0); });
+
+    const totalUSD = Math.round((usdDerivedBasePlusMilestonesUSD + (euroExtrasTotal + euroDownlineTotal + manualAdjustmentsTotal) / usdToEur) * 100) / 100; // reflect complete USD basis for UI if needed
+    const dynamicTotalEUR = Math.round((usdDerivedBasePlusMilestonesEUR + euroExtrasTotal + euroDownlineTotal + manualAdjustmentsTotal) * 100) / 100;
 
     // Already requested (all statuses)
     const existingRequestsSnapshot = await db
@@ -153,6 +162,7 @@ export async function getAvailableEarnings(
         usdDerivedBasePlusMilestonesEUR: Math.round(usdDerivedBasePlusMilestonesEUR * 100) / 100,
         euroExtrasTotal,
         euroDownlineTotal,
+        manualAdjustmentsTotal: Math.round(manualAdjustmentsTotal * 100) / 100,
       },
       totalUSD,
       totalEUR: Math.round(dynamicTotalEUR * 100) / 100,

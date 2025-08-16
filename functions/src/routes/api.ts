@@ -32,6 +32,17 @@ import { getMonthlyFxRate } from "../fx/getMonthlyRate";
 import { getProfile, changePassword, changeEmail, updateBank, adminUpdateManagerCredentials, adminUpdateManagerBank, adminResetManagerPassword } from "../auth/profile";
 import { getEarningsHistory } from "../managers/getEarningsHistory";
 import { getAvailableMonths } from "../managers/getAvailableMonths";
+import multer from "multer";
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const isPdf = file.mimetype === 'application/pdf' || /\.pdf$/i.test(file.originalname || '');
+    if (isPdf) cb(null, true);
+    else cb(new Error('ONLY_PDF_ALLOWED'));
+  }
+});
 
 const apiRouter = Router();
 
@@ -79,6 +90,39 @@ apiRouter.put('/managers/me/bank', updateBank);
 apiRouter.put('/admin/managers/:managerId/credentials', adminUpdateManagerCredentials);
 apiRouter.put('/admin/managers/:managerId/bank', adminUpdateManagerBank);
 apiRouter.post('/admin/managers/:managerId/reset-password', adminResetManagerPassword);
+
+// Admin: adjust manager balance (manual credit/debit) for a month
+apiRouter.post('/admin/managers/:managerId/adjust-balance', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: 'Access Denied: Admin role required.' });
+    return;
+  }
+  try {
+    const { managerId } = req.params;
+    const { amount, month, reason } = (req.body || {}) as { amount?: number; month?: string; reason?: string };
+    if (typeof amount !== 'number' || !isFinite(amount) || amount === 0) {
+      res.status(400).json({ error: 'amount (non-zero number) is required' });
+      return;
+    }
+    const effectiveMonth = (month && /^\d{6}$/.test(month)) ? month : (() => { const d=new Date(); return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`; })();
+    const db = admin.firestore();
+    const ref = db.collection('manualAdjustments').doc();
+    await ref.set({
+      id: ref.id,
+      managerId,
+      month: effectiveMonth,
+      amount: Math.round(amount * 100) / 100,
+      reason: (reason || '').slice(0, 500),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdBy: req.user!.uid,
+      type: 'ADMIN_MANUAL_ADJUSTMENT'
+    });
+    res.status(201).json({ success: true, id: ref.id, managerId, month: effectiveMonth, amount: Math.round(amount * 100) / 100 });
+  } catch (e:any) {
+    console.error('adjust-balance failed', e);
+    res.status(500).json({ error: 'Failed to adjust balance', details: e.message });
+  }
+});
 
 // --- FX RATES ---
 apiRouter.get('/fx/monthly', getMonthlyFxRate);
@@ -743,7 +787,42 @@ apiRouter.get('/creators/top', async (req: AuthenticatedRequest, res: Response) 
   try {
     const db = admin.firestore();
     const month = (req.query.month as string) || (new Date().toISOString().slice(0,7).replace('-',''));
-    // Aggregate transactions by creatorId + managerId for the month
+    const view = String((req.query.view as string) || 'monthly').toLowerCase(); // 'monthly' | 'alltime'
+
+    if (view === 'alltime') {
+      // Read pre-aggregated all-time creator-month snapshots for the period
+      const snap = await db.collection('alltime-creator-revenue').where('month','==', month).get();
+      const byPair = new Map<string, { creatorId: string; creatorHandle: string; managerId: string; managerHandle?: string; gross: number; net: number; base: number }>();
+      for (const d of snap.docs) {
+        const v: any = d.data();
+        const key = `${v.creatorId || 'unknown'}__${v.managerId}`;
+        const current = byPair.get(key) || { creatorId: v.creatorId || 'unknown', creatorHandle: v.creatorHandle || 'unknown', managerId: v.managerId, managerHandle: undefined, gross: 0, net: 0, base: 0 };
+        current.gross += Number(v.grossAmount || 0);
+        current.net += Number(v.netAmount || 0);
+        current.base += Number(v.baseCommission || 0);
+        byPair.set(key, current);
+      }
+      const managerIds = Array.from(new Set(Array.from(byPair.values()).map(v => v.managerId)));
+      const managers: Record<string, any> = {};
+      for (const mid of managerIds) {
+        const mdoc = await db.collection('managers').doc(mid).get();
+        managers[mid] = mdoc.exists ? mdoc.data() : {};
+      }
+      const items = Array.from(byPair.values()).map(v => ({
+        creatorId: v.creatorId,
+        creatorHandle: v.creatorHandle,
+        managerId: v.managerId,
+        managerHandle: managers[v.managerId]?.handle || managers[v.managerId]?.name || v.managerId,
+        grossAmount: Math.round(v.gross * 100) / 100,
+        netAmount: Math.round(v.net * 100) / 100,
+        baseCommission: Math.round(v.base * 100) / 100,
+      }));
+      items.sort((a,b) => (b.netAmount - a.netAmount));
+      res.status(200).json({ success: true, view: 'alltime', month, count: items.length, items });
+      return;
+    }
+
+    // Default monthly view (direct from transactions)
     const snap = await db.collection('transactions').where('month','==', month).get();
     const aggregate = new Map<string, { creatorId: string; creatorHandle: string; managerId: string; managerHandle?: string; gross: number; net: number; base: number }>();
     for (const d of snap.docs) {
@@ -772,7 +851,7 @@ apiRouter.get('/creators/top', async (req: AuthenticatedRequest, res: Response) 
       baseCommission: Math.round(v.base * 100) / 100,
     }));
     items.sort((a,b) => (b.netAmount - a.netAmount));
-    res.status(200).json({ success: true, month, count: items.length, items });
+    res.status(200).json({ success: true, view: 'monthly', month, count: items.length, items });
   } catch (e:any) {
     console.error('💥 Error loading top creators:', e);
     res.status(500).json({ error: 'Failed to load top creators', details: e.message });
@@ -921,7 +1000,7 @@ apiRouter.delete('/managers/commission-data', async (req: AuthenticatedRequest, 
 // --- EARNINGS & PAYOUTS ---
 apiRouter.get("/earnings/:managerId", getManagerEarnings); // Keep old route for compatibility
 apiRouter.get("/payouts/available", getAvailableEarnings);
-apiRouter.post("/payouts/request", requestPayout);
+apiRouter.post("/payouts/request", upload.single('invoice'), requestPayout);
 
 // Admin: list payout requests with optional status filter
 apiRouter.get("/payouts", async (req: AuthenticatedRequest, res: Response): Promise<void> => {
@@ -1657,6 +1736,39 @@ apiRouter.post('/bonuses/cleanup/diamond', async (req: AuthenticatedRequest, res
   } catch (e:any) {
     console.error('💥 diamond cleanup failed', e);
     res.status(500).json({ error: 'Failed to cleanup diamond bonuses', details: e.message });
+  }
+});
+
+// Admin: All-Time manager revenue (pre-aggregated)
+apiRouter.get('/admin/alltime/managers', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') { res.status(403).json({ error: 'Access Denied: Admin role required.' }); return; }
+  try {
+    const db = admin.firestore();
+    const month = (req.query.month as string) || (new Date().toISOString().slice(0,7).replace('-',''));
+    const snap = await db.collection('alltime-manager-revenue').where('month','==', month).get();
+    const items = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    res.status(200).json({ success: true, month, count: items.length, items });
+  } catch (e:any) {
+    console.error('💥 Error loading alltime manager revenue:', e);
+    res.status(500).json({ error: 'Failed to load alltime manager revenue', details: e.message });
+  }
+});
+
+// Admin: All-Time creator revenue (pre-aggregated)
+apiRouter.get('/admin/alltime/creators', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') { res.status(403).json({ error: 'Access Denied: Admin role required.' }); return; }
+  try {
+    const db = admin.firestore();
+    const month = (req.query.month as string) || (new Date().toISOString().slice(0,7).replace('-',''));
+    const managerId = (req.query.managerId as string) || '';
+    let q: FirebaseFirestore.Query = db.collection('alltime-creator-revenue').where('month','==', month);
+    if (managerId) q = q.where('managerId','==', managerId);
+    const snap = await q.get();
+    const items = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    res.status(200).json({ success: true, month, count: items.length, items });
+  } catch (e:any) {
+    console.error('💥 Error loading alltime creator revenue:', e);
+    res.status(500).json({ error: 'Failed to load alltime creator revenue', details: e.message });
   }
 });
 

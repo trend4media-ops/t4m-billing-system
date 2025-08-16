@@ -33,6 +33,18 @@ export async function requestPayout(
       return;
     }
 
+    // Require PDF invoice upload
+    const file = (req as any).file as Express.Multer.File | undefined;
+    if (!file) {
+      res.status(400).json({ error: "Eine Rechnung (PDF) ist verpflichtend hochzuladen." });
+      return;
+    }
+    const isPdf = file.mimetype === 'application/pdf' || /\.pdf$/i.test(file.originalname || '');
+    if (!isPdf) {
+      res.status(400).json({ error: "Nur PDF-Dokumente werden akzeptiert." });
+      return;
+    }
+
     const raw = typeof amount === 'number' ? amount : requestedAmount;
     const requested = raw ? Math.round(raw * 100) / 100 : 0;
     if (!requested || requested <= 0) {
@@ -50,7 +62,15 @@ export async function requestPayout(
       .where('month', '==', period)
       .get();
     const bonusesSum = bonusesSnap.docs.reduce((sum, d) => sum + (d.data().amount || 0), 0);
-    const totalEarnings = Math.round((baseCommission + bonusesSum) * 100) / 100;
+
+    // Manual adjustments for the month
+    const adjustmentsSnap = await db.collection('manualAdjustments')
+      .where('managerId','==', managerId)
+      .where('month','==', period)
+      .get();
+    const manualAdjustmentsTotal = adjustmentsSnap.docs.reduce((sum, d) => sum + (d.data().amount || 0), 0);
+
+    const totalEarnings = Math.round((baseCommission + bonusesSum + manualAdjustmentsTotal) * 100) / 100;
 
     // 2) Sum already requested for the month (open + approved + paid)
     const existingRequestsSnapshot = await db
@@ -65,6 +85,17 @@ export async function requestPayout(
       .reduce((sum, d:any) => sum + (d.amount || d.requestedAmount || 0), 0);
 
     const netAvailable = Math.max(0, totalEarnings - alreadyRequested);
+
+    // Enforce minimum available threshold of 150 EUR for allowing requests
+    if (netAvailable < 150) {
+      res.status(400).json({ 
+        error: "Mindestauszahlungsbetrag ist 150€ (verfügbarer Betrag zu gering).",
+        netAvailable,
+        requiredMinimum: 150
+      });
+      return;
+    }
+
     if (requested > netAvailable) {
       res.status(400).json({ 
         error: "Requested amount exceeds available balance.",
@@ -76,7 +107,15 @@ export async function requestPayout(
       return;
     }
 
-    // 3) Create payout request in payoutRequests collection
+    // 3) Upload invoice PDF to Cloud Storage
+    const bucket = admin.storage().bucket();
+    const safeName = (file.originalname || 'invoice.pdf').replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const destPath = `invoices/${managerId}/${period}/${Date.now()}_${safeName}`;
+    const fileRef = bucket.file(destPath);
+    await fileRef.save(file.buffer, { contentType: 'application/pdf', resumable: false, public: false, metadata: { cacheControl: 'no-store' } });
+    const [signedUrl] = await fileRef.getSignedUrl({ action: 'read', expires: Date.now() + 1000 * 60 * 60 * 24 * 30 }); // 30 Tage URL
+
+    // 4) Create payout request in payoutRequests collection
     const ref = db.collection("payoutRequests").doc();
     const newPayoutRequest = {
       id: ref.id,
@@ -101,15 +140,26 @@ export async function requestPayout(
           actor: "MANAGER",
           userId: uid,
         }
-      ]
+      ],
+      invoice: {
+        storagePath: destPath,
+        fileName: file.originalname || 'invoice.pdf',
+        contentType: 'application/pdf',
+        size: file.size || null,
+        signedUrl: signedUrl
+      }
     } as any;
 
     await ref.set(newPayoutRequest);
 
     res.status(201).json({ success: true, request: newPayoutRequest });
     
-  } catch (error) {
+  } catch (error:any) {
     console.error("💥 Error in requestPayout:", error);
+    if (String(error?.message || '').includes('ONLY_PDF_ALLOWED')) {
+      res.status(400).json({ error: "Nur PDF-Dokumente werden akzeptiert." });
+      return;
+    }
     res.status(500).json({ error: "Failed to create payout request due to an internal server error." });
   }
 } 
