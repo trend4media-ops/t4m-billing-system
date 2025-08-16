@@ -10,6 +10,16 @@ export interface SystemConfig {
   diamondThreshold?: number; // e.g. 1.2
   recruitmentBonusPayouts?: { live: number; team: number };
   graduationBonusPayouts?: { live: number; team: number };
+  // NEW: base commission rates and downline rates
+  baseCommissionRates?: { live: number; team: number };
+  downlineRates?: { A: number; B: number; C: number };
+  // Metadata for versioning
+  name?: string;
+  effectiveFrom?: string; // YYYYMM – used to pick config for a month
+  activeFrom?: FirebaseFirestore.Timestamp | null;
+  activeTo?: FirebaseFirestore.Timestamp | null;
+  createdBy?: string;
+  createdAt?: FirebaseFirestore.Timestamp;
 }
 
 export class CommissionConfigService {
@@ -38,25 +48,59 @@ export class CommissionConfigService {
       if (!snap.empty) {
         this.cached = (snap.docs[0].data() as any) as SystemConfig;
         this.lastFetchMs = now;
-        return this.cached!;
+        return this.withDefaults(this.cached!);
       }
     } catch {}
 
     // Defaults if none configured
-    this.cached = {
-      milestoneDeductions: { N: 300, O: 1000, P: 240, S: 150 },
-      milestonePayouts: {
-        live: { S: 75, N: 150, O: 400, P: 100 },
-        team: { S: 80, N: 165, O: 450, P: 120 }
-      },
-      diamondBonusPayouts: { live: 50, team: 60 },
-      diamondThreshold: 1.2,
-      recruitmentBonusPayouts: { live: 50, team: 60 },
-      graduationBonusPayouts: { live: 50, team: 60 },
-    };
+    this.cached = this.defaultConfig();
     this.lastFetchMs = now;
     return this.cached;
   }
 
+  // NEW: Resolve config for a specific period (YYYYMM). Falls back to active/defaults.
+  async getConfigForPeriod(period: string): Promise<SystemConfig> {
+    try {
+      const db = admin.firestore();
+      const snap = await db
+        .collection('systemConfig')
+        .orderBy('effectiveFrom', 'desc')
+        .limit(20)
+        .get();
+      if (!snap.empty) {
+        const configs = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) as Array<SystemConfig & { id: string }>;
+        const chosen = configs.find(c => typeof c.effectiveFrom === 'string' && c.effectiveFrom <= period);
+        if (chosen) return this.withDefaults(chosen);
+      }
+    } catch {}
+    return this.getActiveConfig();
+  }
+
   invalidate() { this.cached = null; this.lastFetchMs = 0; }
+
+  private defaultConfig(): SystemConfig {
+    return this.withDefaults({});
+  }
+
+  private withDefaults(cfg: SystemConfig): SystemConfig {
+    return {
+      milestoneDeductions: cfg.milestoneDeductions ?? { N: 300, O: 1000, P: 240, S: 150 },
+      milestonePayouts: cfg.milestonePayouts ?? {
+        live: { S: 75, N: 150, O: 400, P: 100 },
+        team: { S: 80, N: 165, O: 450, P: 120 }
+      },
+      diamondBonusPayouts: cfg.diamondBonusPayouts ?? { live: 50, team: 60 },
+      diamondThreshold: cfg.diamondThreshold ?? 1.2,
+      recruitmentBonusPayouts: cfg.recruitmentBonusPayouts ?? { live: 50, team: 60 },
+      graduationBonusPayouts: cfg.graduationBonusPayouts ?? { live: 50, team: 60 },
+      baseCommissionRates: cfg.baseCommissionRates ?? { live: 0.30, team: 0.35 },
+      downlineRates: cfg.downlineRates ?? { A: 0.10, B: 0.075, C: 0.05 },
+      name: cfg.name,
+      effectiveFrom: cfg.effectiveFrom,
+      activeFrom: cfg.activeFrom ?? null,
+      activeTo: cfg.activeTo ?? null,
+      createdBy: cfg.createdBy,
+      createdAt: cfg.createdAt,
+    };
+  }
 } 

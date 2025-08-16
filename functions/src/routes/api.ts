@@ -635,6 +635,46 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
       perManagerCreators.forEach((set, mid) => creatorCountsByManager.set(mid, set.size));
     }
 
+    // Fallback: if there are no downline bonus docs for this month, compute downline from genealogy + transactions (BASE commissions)
+    try {
+      const hasAnyDownline = downlineByManager.size > 0 && Array.from(downlineByManager.values()).some(v => (v.total || 0) > 0);
+      if (!hasAnyDownline) {
+        const [geneSnap, allTxSnap, cfg] = await Promise.all([
+          db.collection('genealogy').get(),
+          db.collection('transactions').where('month','==', month).get(),
+          CommissionConfigService.getInstance().getConfigForPeriod(month)
+        ]);
+        // Build base commission per live manager for the month
+        const baseByLiveManager = new Map<string, number>();
+        allTxSnap.forEach((tDoc: any) => {
+          const t = tDoc.data();
+          const liveId = String(t.managerId || '');
+          const base = Number(t.baseCommission || 0) || 0;
+          if (!liveId) return;
+          baseByLiveManager.set(liveId, (baseByLiveManager.get(liveId) || 0) + base);
+        });
+        // Aggregate to team managers by genealogy level rates
+        const rates = cfg.downlineRates || { A: 0.10, B: 0.075, C: 0.05 };
+        geneSnap.forEach((gDoc: any) => {
+          const g = gDoc.data();
+          const teamId = String(g.teamManagerId || '');
+          const liveId = String(g.liveManagerId || '');
+          const level = String(g.level || 'A').toUpperCase();
+          if (!teamId || !liveId) return;
+          const base = baseByLiveManager.get(liveId) || 0;
+          if (base <= 0) return;
+          const rate = (rates as any)[level] ?? (level === 'A' ? 0.10 : level === 'B' ? 0.075 : 0.05);
+          const amt = base * rate;
+          const d = downlineByManager.get(teamId) || { a: 0, b: 0, c: 0, total: 0 };
+          if (level === 'A') d.a += amt; else if (level === 'B') d.b += amt; else d.c += amt;
+          d.total += amt;
+          downlineByManager.set(teamId, d);
+        });
+      }
+    } catch (e) {
+      console.warn('downline fallback computation failed:', e);
+    }
+
     const prevNetByManager = new Map<string, number>();
     (prevNetDocSnaps || []).forEach(doc => {
       if (!doc || !doc.exists) return;
@@ -1745,8 +1785,33 @@ apiRouter.get('/admin/alltime/managers', async (req: AuthenticatedRequest, res: 
   try {
     const db = admin.firestore();
     const month = (req.query.month as string) || (new Date().toISOString().slice(0,7).replace('-',''));
-    const snap = await db.collection('alltime-manager-revenue').where('month','==', month).get();
-    const items = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    // Prefer pre-aggregated snapshots
+    const alltimeSnap = await db.collection('alltime-manager-revenue').where('month','==', month).get();
+    let items: any[] = [];
+    if (!alltimeSnap.empty) {
+      items = alltimeSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    } else {
+      // Fallback for historical months before snapshot feature: derive from manager-earnings
+      const earningsSnap = await db.collection('manager-earnings').where('month','==', month).get();
+      items = earningsSnap.docs.map(d => {
+        const data: any = d.data() || {};
+        return {
+          id: d.id,
+          managerId: data.managerId,
+          month,
+          totalGross: data.totalGross || 0,
+          totalNet: data.totalNet || 0,
+          baseCommission: data.baseCommission || 0,
+          milestonePayouts: data.milestonePayouts || 0,
+          extras: data.extras || 0,
+          downlineEarnings: data.downlineEarnings || 0,
+          totalEarnings: data.totalEarnings || ((data.baseCommission || 0) + (data.milestonePayouts || 0) + (data.extras || 0) + (data.downlineEarnings || 0)),
+          transactionCount: data.transactionCount || 0,
+          creatorCount: data.creatorCount || 0,
+          updatedAt: data.calculatedAt || null,
+        };
+      });
+    }
     res.status(200).json({ success: true, month, count: items.length, items });
   } catch (e:any) {
     console.error('💥 Error loading alltime manager revenue:', e);
@@ -1769,6 +1834,258 @@ apiRouter.get('/admin/alltime/creators', async (req: AuthenticatedRequest, res: 
   } catch (e:any) {
     console.error('💥 Error loading alltime creator revenue:', e);
     res.status(500).json({ error: 'Failed to load alltime creator revenue', details: e.message });
+  }
+});
+
+// Admin: Bulk available payout per manager for a period (EUR)
+apiRouter.get('/admin/payouts/available/bulk', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') { res.status(403).json({ error: 'Access Denied: Admin role required.' }); return; }
+  try {
+    const db = admin.firestore();
+    const period = (req.query.period as string) || (req.query.month as string);
+    if (!period || !/^\d{6}$/.test(period)) { res.status(400).json({ error: 'Invalid or missing period YYYYMM' }); return; }
+
+    // FX rate (USD->EUR on the 6th)
+    const fxRef = db.collection('fxRates').doc(period);
+    let fxDoc = await fxRef.get();
+    if (!fxDoc.exists) {
+      const asOfDate = `${period.slice(0,4)}-${period.slice(4,6)}-06`;
+      const url = `https://api.exchangerate.host/${asOfDate}?base=USD&symbols=EUR`;
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`FX fetch failed for ${asOfDate}`);
+      const json = await r.json();
+      const usdToEur = json?.rates?.EUR;
+      if (typeof usdToEur !== 'number' || !isFinite(usdToEur)) throw new Error('Invalid FX response');
+      await fxRef.set({ month: period, asOfDate, usdToEur: Math.round(usdToEur * 1e6) / 1e6, source: 'exchangerate.host', createdAt: admin.firestore.FieldValue.serverTimestamp() });
+      fxDoc = await fxRef.get();
+    }
+    const usdToEur = Number((fxDoc.data() as any)?.usdToEur || 1);
+
+    // Base data per manager for period
+    const [earnSnap, adjustmentsSnap, payoutsSnap] = await Promise.all([
+      db.collection('manager-earnings').where('month','==', period).get(),
+      db.collection('manualAdjustments').where('month','==', period).get(),
+      db.collection('payoutRequests').where('period','==', period).get(),
+    ]);
+
+    const adjustmentsByManager = new Map<string, number>();
+    adjustmentsSnap.forEach(d => {
+      const a: any = d.data();
+      const mid = String(a.managerId || '');
+      if (!mid) return;
+      adjustmentsByManager.set(mid, (adjustmentsByManager.get(mid) || 0) + (Number(a.amount || 0)));
+    });
+
+    const requestedByManager = new Map<string, number>();
+    payoutsSnap.forEach(d => {
+      const p: any = d.data();
+      const mid = String(p.managerId || '');
+      if (!mid) return;
+      const amt = Number(p.amount || p.requestedAmount || 0);
+      requestedByManager.set(mid, (requestedByManager.get(mid) || 0) + amt);
+    });
+
+    const items: any[] = [];
+    earnSnap.forEach(d => {
+      const e: any = d.data() || {};
+      const managerId = String(e.managerId || '');
+      if (!managerId) return;
+      const baseUSD = Number(e.baseCommission || 0);
+      const milestonesUSD = Number(e.milestonePayouts || 0);
+      const extrasEUR = Number(e.extras || 0);
+      const downlineEUR = Number(e.downlineEarnings || 0);
+      const adjustmentsEUR = adjustmentsByManager.get(managerId) || 0;
+      const alreadyRequestedEUR = requestedByManager.get(managerId) || 0;
+      const usdDerivedBasePlusMilestonesEUR = (baseUSD + milestonesUSD) * usdToEur;
+      const dynamicTotalEUR = Math.round((usdDerivedBasePlusMilestonesEUR + extrasEUR + downlineEUR + adjustmentsEUR) * 100) / 100;
+      const availableEUR = Math.max(0, Math.round((dynamicTotalEUR - alreadyRequestedEUR) * 100) / 100);
+      items.push({
+        managerId,
+        period,
+        totalEUR: dynamicTotalEUR,
+        alreadyRequestedEUR,
+        availableEUR,
+        breakdown: {
+          baseUSD,
+          milestonesUSD,
+          extrasEUR,
+          downlineEUR,
+          adjustmentsEUR,
+          usdToEur,
+        }
+      });
+    });
+
+    res.status(200).json({ success: true, period, count: items.length, items });
+  } catch (e:any) {
+    console.error('💥 bulk available failed', e);
+    res.status(500).json({ error: 'Failed to compute available balances', details: e.message });
+  }
+});
+
+// Admin: cumulative balances up to a month (inclusive)
+apiRouter.get('/admin/managers/balances', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') { res.status(403).json({ error: 'Access Denied: Admin role required.' }); return; }
+  try {
+    const db = admin.firestore();
+    const upTo = (req.query.upTo as string) || (req.query.month as string) || (() => { const d=new Date(); return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`; })();
+    if (!/^\d{6}$/.test(upTo)) { res.status(400).json({ error: 'Invalid upTo YYYYMM' }); return; }
+
+    // Load earnings for all months <= upTo
+    const earnSnap = await db.collection('manager-earnings').where('month','<=', upTo).get();
+    const months = Array.from(new Set(earnSnap.docs.map(d => String((d.data() as any).month)))) as string[];
+    // Load/calc fx for those months
+    const fxMap = new Map<string, number>();
+    for (const m of months) {
+      if (!/^\d{6}$/.test(m)) continue;
+      let fxDoc = await db.collection('fxRates').doc(m).get();
+      if (!fxDoc.exists) {
+        const asOfDate = `${m.slice(0,4)}-${m.slice(4,6)}-06`;
+        const r = await fetch(`https://api.exchangerate.host/${asOfDate}?base=USD&symbols=EUR`);
+        if (r.ok) {
+          const json = await r.json();
+          const eur = json?.rates?.EUR;
+          if (typeof eur === 'number' && isFinite(eur)) {
+            await db.collection('fxRates').doc(m).set({ month: m, asOfDate, usdToEur: Math.round(eur*1e6)/1e6, source: 'exchangerate.host', createdAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            fxDoc = await db.collection('fxRates').doc(m).get();
+          }
+        }
+      }
+      const fx = Number((fxDoc.data() as any)?.usdToEur || 1);
+      fxMap.set(m, fx > 0 ? fx : 1);
+    }
+
+    // Sum adjustments and payouts up to upTo
+    const [adjSnap, paySnap] = await Promise.all([
+      db.collection('manualAdjustments').where('month','<=', upTo).get(),
+      db.collection('payoutRequests').where('period','<=', upTo).get(),
+    ]);
+    const adjustmentsByManager = new Map<string, number>();
+    adjSnap.forEach(doc => {
+      const a: any = doc.data();
+      const mid = String(a.managerId || '');
+      if (!mid) return;
+      adjustmentsByManager.set(mid, (adjustmentsByManager.get(mid) || 0) + Number(a.amount || 0));
+    });
+    const requestedByManager = new Map<string, number>();
+    paySnap.forEach(doc => {
+      const p: any = doc.data();
+      const mid = String(p.managerId || '');
+      const status = String(p.status || '').toUpperCase();
+      if (!mid || status !== 'PAID') return;
+      requestedByManager.set(mid, (requestedByManager.get(mid) || 0) + Number(p.amount || p.requestedAmount || 0));
+    });
+
+    const byManager: Record<string, any> = {};
+    earnSnap.forEach(doc => {
+      const e: any = doc.data() || {};
+      const managerId = String(e.managerId || '');
+      const month = String(e.month || '');
+      if (!managerId || !/^\d{6}$/.test(month) || month > upTo) return;
+      const fx = fxMap.get(month) || 1;
+      const baseUSD = Number(e.baseCommission || 0);
+      const milestonesUSD = Number(e.milestonePayouts || 0);
+      const extrasEUR = Number(e.extras || 0);
+      const downlineEUR = Number(e.downlineEarnings || 0);
+      const monthEUR = (baseUSD + milestonesUSD) * fx + extrasEUR + downlineEUR;
+      const cur = byManager[managerId] || { managerId, months: new Set<string>(), totalEUR: 0 };
+      cur.totalEUR += monthEUR;
+      cur.months.add(month);
+      byManager[managerId] = cur;
+    });
+
+    const items = Object.values(byManager).map((v: any) => {
+      const adj = adjustmentsByManager.get(v.managerId) || 0;
+      const req = requestedByManager.get(v.managerId) || 0;
+      const totalEUR = Math.round((v.totalEUR + adj) * 100) / 100;
+      const balanceEUR = Math.max(0, Math.round((totalEUR - req) * 100) / 100);
+      return { managerId: v.managerId, upTo, totalEUR, requestedEUR: req, balanceEUR, months: Array.from(v.months).sort() };
+    });
+
+    res.status(200).json({ success: true, upTo, count: items.length, items });
+  } catch (e:any) {
+    console.error('💥 balances upTo failed', e);
+    res.status(500).json({ error: 'Failed to compute balances', details: e.message });
+  }
+});
+
+// Manager: my cumulative balance up to a month (inclusive)
+apiRouter.get('/managers/me/balance', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!req.user || (req.user.role !== 'MANAGER' && req.user.role !== 'manager')) { res.status(403).json({ error: 'Manager role required' }); return; }
+    const db = admin.firestore();
+    const upTo = (req.query.upTo as string) || (() => { const d=new Date(); return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`; })();
+    if (!/^\d{6}$/.test(upTo)) { res.status(400).json({ error: 'Invalid upTo YYYYMM' }); return; }
+    const managerId = String(req.user.managerId || '');
+    if (!managerId) { res.status(400).json({ error: 'Manager context missing' }); return; }
+
+    const earnSnap = await db.collection('manager-earnings').where('month','<=', upTo).where('managerId','==', managerId).get();
+    const months = Array.from(new Set(earnSnap.docs.map(d => String((d.data() as any).month)))) as string[];
+    const fxMap = new Map<string, number>();
+    for (const m of months) {
+      let fxDoc = await db.collection('fxRates').doc(m).get();
+      if (!fxDoc.exists) {
+        const asOfDate = `${m.slice(0,4)}-${m.slice(4,6)}-06`;
+        const r = await fetch(`https://api.exchangerate.host/${asOfDate}?base=USD&symbols=EUR`);
+        if (r.ok) {
+          const json = await r.json();
+          const eur = json?.rates?.EUR;
+          if (typeof eur === 'number' && isFinite(eur)) {
+            await db.collection('fxRates').doc(m).set({ month: m, asOfDate, usdToEur: Math.round(eur*1e6)/1e6, source: 'exchangerate.host', createdAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            fxDoc = await db.collection('fxRates').doc(m).get();
+          }
+        }
+      }
+      const fx = Number((fxDoc.data() as any)?.usdToEur || 1);
+      fxMap.set(m, fx > 0 ? fx : 1);
+    }
+
+    const [adjSnap, paySnap] = await Promise.all([
+      db.collection('manualAdjustments').where('month','<=', upTo).where('managerId','==', managerId).get(),
+      db.collection('payoutRequests').where('period','<=', upTo).where('managerId','==', managerId).get(),
+    ]);
+    let adjustmentsEUR = 0;
+    adjSnap.forEach(doc => { adjustmentsEUR += Number((doc.data() as any).amount || 0); });
+    let requestedEUR = 0;
+    paySnap.forEach(doc => { const d = doc.data() as any; if (String(d.status||'').toUpperCase()==='PAID') requestedEUR += Number(d.amount || d.requestedAmount || 0); });
+
+    let totalEUR = 0;
+    earnSnap.forEach(doc => {
+      const e: any = doc.data() || {};
+      const m = String(e.month || '');
+      const fx = fxMap.get(m) || 1;
+      const baseUSD = Number(e.baseCommission || 0);
+      const milestonesUSD = Number(e.milestonePayouts || 0);
+      const extrasEUR = Number(e.extras || 0);
+      const downlineEUR = Number(e.downlineEarnings || 0);
+      totalEUR += (baseUSD + milestonesUSD) * fx + extrasEUR + downlineEUR;
+    });
+    totalEUR = Math.round((totalEUR + adjustmentsEUR) * 100) / 100;
+    const balanceEUR = Math.max(0, Math.round((totalEUR - requestedEUR) * 100) / 100);
+
+    res.status(200).json({ success: true, managerId, upTo, totalEUR, requestedEUR, adjustmentsEUR, balanceEUR });
+  } catch (e:any) {
+    console.error('my cumulative balance failed', e);
+    res.status(500).json({ error: 'Failed to compute balance', details: e.message });
+  }
+});
+
+// Admin: list manual adjustments for a manager
+apiRouter.get('/admin/managers/:managerId/adjustments', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') { res.status(403).json({ error: 'Access Denied: Admin role required.' }); return; }
+  try {
+    const { managerId } = req.params as { managerId: string };
+    const db = admin.firestore();
+    const snap = await db.collection('manualAdjustments').where('managerId','==', managerId).orderBy('createdAt','desc').get().catch(async () => {
+      // If no index on createdAt, return unordered
+      const s2 = await db.collection('manualAdjustments').where('managerId','==', managerId).get();
+      return s2;
+    });
+    const items = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    res.status(200).json({ success: true, managerId, count: items.length, items });
+  } catch (e:any) {
+    console.error('💥 list adjustments failed', e);
+    res.status(500).json({ error: 'Failed to fetch adjustments', details: e.message });
   }
 });
 

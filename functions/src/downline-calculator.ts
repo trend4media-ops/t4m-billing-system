@@ -2,15 +2,12 @@
 import * as admin from 'firebase-admin';
 import { onSchedule, ScheduledEvent } from 'firebase-functions/v2/scheduler';
 import { onRequest } from 'firebase-functions/v2/https';
+import { CommissionConfigService } from './services/commissionConfig';
 
 // Firebase Admin SDK is initialized in the root index.js
 const db = admin.firestore();
 
-const DOWNLINE_COMMISSION_RATES = {
-  A: 0.10,
-  B: 0.075,
-  C: 0.05,
-};
+// Removed hardcoded constants; use config
 
 /**
  * Scheduled function to be run monthly to calculate downline commissions
@@ -56,6 +53,10 @@ export async function calculateDownlineForPeriod(period: string): Promise<void> 
     }
   }
 
+  // Load config for period
+  const cfg = await CommissionConfigService.getInstance().getConfigForPeriod(period);
+  const rates = cfg.downlineRates || { A: 0.10, B: 0.075, C: 0.05 };
+
   const managersSnapshot = await db.collection('managers').get();
   if (managersSnapshot.empty) return;
 
@@ -89,7 +90,7 @@ export async function calculateDownlineForPeriod(period: string): Promise<void> 
       });
       if (downlineBase <= 0) continue;
 
-      const rate = DOWNLINE_COMMISSION_RATES[level];
+      const rate = rates[level as keyof typeof rates] ?? 0;
       const commission = downlineBase * rate;
 
       // Deterministic document id to ensure idempotency per (period, teamManager, liveManager, level)

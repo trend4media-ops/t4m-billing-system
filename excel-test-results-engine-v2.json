@@ -1,83 +1,93 @@
 {
-  "timestamp": "2025-08-10T15:32:15.846Z",
-  "file": "/Users/sp/T4M WEB APP/.firebase/ Task_202507_UTC+0_2025_08_10_03_06_51.xlsx",
-  "totalRows": 205,
-  "totalGross": 10250.310999999992,
+  "timestamp": "2025-08-16T22:11:42.823Z",
+  "file": " Neu_Task_202506_UTC+0_2025_07_29_22_14_15.xlsx",
+  "totalRows": 212,
+  "totalGross": 15609.541799999999,
   "milestoneCounts": {
-    "S": 4,
+    "S": 0,
     "N": 0,
     "O": 0,
     "P": 1
   },
   "managerStats": {
-    "Matschersgamingworld": {
+    "VenTriiX": {
       "type": "LIVE",
-      "gross": 574.3975999999999,
-      "count": 28
-    },
-    "Florian Tripodi": {
-      "type": "LIVE",
-      "gross": 1093.5115999999998,
-      "count": 86
-    },
-    "♤Kaida♤": {
-      "type": "LIVE",
-      "gross": 1137.7977999999998,
-      "count": 60
-    },
-    "Tim Ostholt": {
-      "type": "LIVE",
-      "gross": 1416.0600000000002,
-      "count": 34
-    },
-    "ColorfulCollection": {
-      "type": "LIVE",
-      "gross": 2164.1954,
-      "count": 52
+      "gross": 55.7436,
+      "count": 10
     },
     "Gosia Ocepek": {
       "type": "LIVE",
-      "gross": 327.84239999999994,
-      "count": 21
+      "gross": 387.70930000000004,
+      "count": 26
     },
     "Manni Ocepek": {
       "type": "TEAM",
-      "gross": 423.76270000000005,
-      "count": 49
-    },
-    "André Stark": {
-      "type": "LIVE",
-      "gross": 2670.1821999999993,
-      "count": 10
-    },
-    "VenTriiX": {
-      "type": "LIVE",
-      "gross": 316.9215999999999,
-      "count": 10
+      "gross": 8160.9967000000015,
+      "count": 57
     },
     "Ghul": {
       "type": "LIVE",
-      "gross": 1.624,
+      "gross": 12.8238,
+      "count": 8
+    },
+    "Matschersgamingworld": {
+      "type": "LIVE",
+      "gross": 2079.6560000000004,
+      "count": 32
+    },
+    "Tim Ostholt": {
+      "type": "LIVE",
+      "gross": 602.1902,
+      "count": 27
+    },
+    "♤Kaida♤": {
+      "type": "LIVE",
+      "gross": 1531.3752000000004,
+      "count": 56
+    },
+    "Florian Tripodi": {
+      "type": "LIVE",
+      "gross": 1004.4421999999997,
+      "count": 80
+    },
+    "TheMrDoesi": {
+      "type": "LIVE",
+      "gross": 1.1484,
+      "count": 2
+    },
+    "ColorfulCollection": {
+      "type": "LIVE",
+      "gross": 4904.219800000001,
+      "count": 48
+    },
+    "Marina Ostholt": {
+      "type": "LIVE",
+      "gross": 234.6696,
+      "count": 24
+    },
+    "Baastti": {
+      "type": "LIVE",
+      "gross": 131.56,
       "count": 6
     },
     "Tu Es Fixi": {
       "type": "LIVE",
-      "gross": 8912.3446,
-      "count": 10
+      "gross": 7578.7898000000005,
+      "count": 5
     },
-    "TheMrDoesi": {
+    "André Stark": {
       "type": "LIVE",
-      "gross": 0.2793,
-      "count": 2
+      "gross": 3100.7960000000003,
+      "count": 8
     },
-    "Baastti": {
+    "DkStudio": {
       "type": "LIVE",
-      "gross": 45.6428,
+      "gross": 24.763199999999998,
       "count": 6
     },
-    "Marina Ostholt": {
+    "Christian": {
       "type": "LIVE",
-      "gross": 0,
+      "gross": 806.0096000000001,
       "count": 2
     }
   },

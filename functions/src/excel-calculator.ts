@@ -3,6 +3,7 @@ import * as admin from 'firebase-admin';
 import * as XLSX from 'xlsx';
 import { z } from 'zod';
 import { calculateDownlineForPeriod } from './downline-calculator';
+import { CommissionConfigService } from './services/commissionConfig';
 
 // Firebase Admin SDK is initialized in the root index.js
 const db = admin.firestore();
@@ -684,6 +685,9 @@ export async function processUploadedExcel(batchId: string) {
     const dedupe = await clearExistingMonthData(month, batchId);
     await uploadDocRef.update({ active: true, dedupeSuperseded: dedupe.supersededCount });
 
+    // Load config for this month (to allow dynamic settings without code changes)
+    const cfg = await CommissionConfigService.getInstance().getConfigForPeriod(month);
+
     // Step 1: Download file
     await uploadDocRef.update({ 
       status: 'DOWNLOADING', 
@@ -738,7 +742,8 @@ export async function processUploadedExcel(batchId: string) {
         progress: 35,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
-      await processCommissionData(rows, batchId, month, uploadDocRef, managerMap);
+      // Pass config through to allow dynamic rates
+      await processCommissionData(rows, batchId, month, uploadDocRef, managerMap, cfg);
       
       // Step 5: Update manager earnings
       console.log(`📊 Updating manager earnings summaries...`);
@@ -893,7 +898,7 @@ async function processComparisonData(rows: any[][], month: string, fileName: str
 /**
  * Processes the full commission data - OPTIMIZED WITH LIVE PROGRESS
  */
-export async function processCommissionData(rows: any[][], batchId: string, month:string, uploadDocRef?: admin.firestore.DocumentReference, managerMap?: Map<string, string>) {
+export async function processCommissionData(rows: any[][], batchId: string, month:string, uploadDocRef?: admin.firestore.DocumentReference, managerMap?: Map<string, string>, cfg?: any) {
   const firestore = admin.firestore();
   const validationErrors: { row: number, errors: any }[] = [];
   let processedRows = 0;
@@ -981,7 +986,7 @@ export async function processCommissionData(rows: any[][], batchId: string, mont
           + (hasS ? MILESTONE_DEDUCTIONS.S : 0);
 
         const netForCommission = Math.max(0, grossAmount - deductions);
-        const baseCommissionRate = BASE_COMMISSION_RATES[managerType];
+        const baseCommissionRate = (cfg?.baseCommissionRates?.[managerType] ?? BASE_COMMISSION_RATES[managerType]);
         const baseCommission = netForCommission * baseCommissionRate;
 
         const txRef = firestore.collection('transactions').doc();
@@ -1042,10 +1047,10 @@ export async function processCommissionData(rows: any[][], batchId: string, mont
   try {
     const writeBatch = firestore.batch();
     let ops = 0;
-    Object.entries(perManager).forEach(([managerId, info]) => {
-      const rates = MILESTONE_BONUSES[info.type];
-      const entries: Array<{ type: 'MILESTONE_S'|'MILESTONE_N'|'MILESTONE_O'|'MILESTONE_P'; amount: number } > = [];
-      if (info.milestones.S > 0) entries.push({ type: 'MILESTONE_S', amount: rates.S * info.milestones.S });
+          Object.entries(perManager).forEach(([managerId, info]) => {
+        const rates = (cfg?.milestonePayouts?.[info.type] ?? MILESTONE_BONUSES[info.type]);
+        const entries: Array<{ type: 'MILESTONE_S'|'MILESTONE_N'|'MILESTONE_O'|'MILESTONE_P'; amount: number } > = [];
+        if (info.milestones.S > 0) entries.push({ type: 'MILESTONE_S', amount: rates.S * info.milestones.S });
       if (info.milestones.N > 0) entries.push({ type: 'MILESTONE_N', amount: rates.N * info.milestones.N });
       if (info.milestones.O > 0) entries.push({ type: 'MILESTONE_O', amount: rates.O * info.milestones.O });
       if (info.milestones.P > 0) entries.push({ type: 'MILESTONE_P', amount: rates.P * info.milestones.P });
@@ -1091,11 +1096,11 @@ export async function processCommissionData(rows: any[][], batchId: string, mont
     });
     const fixBatch = firestore.batch();
     Object.entries(perManager).forEach(([mid, info]) => {
-      const expected = {
-        S: (info.milestones.S || 0) * MILESTONE_BONUSES[info.type].S,
-        N: (info.milestones.N || 0) * MILESTONE_BONUSES[info.type].N,
-        O: (info.milestones.O || 0) * MILESTONE_BONUSES[info.type].O,
-        P: (info.milestones.P || 0) * MILESTONE_BONUSES[info.type].P,
+              const expected = {
+          S: (info.milestones.S || 0) * ((cfg?.milestonePayouts?.[info.type] ?? MILESTONE_BONUSES[info.type]).S),
+          N: (info.milestones.N || 0) * ((cfg?.milestonePayouts?.[info.type] ?? MILESTONE_BONUSES[info.type]).N),
+          O: (info.milestones.O || 0) * ((cfg?.milestonePayouts?.[info.type] ?? MILESTONE_BONUSES[info.type]).O),
+          P: (info.milestones.P || 0) * ((cfg?.milestonePayouts?.[info.type] ?? MILESTONE_BONUSES[info.type]).P),
       };
       const actual = byManagerType.get(mid) || { S:0,N:0,O:0,P:0 };
       (['S','N','O','P'] as const).forEach(key => {

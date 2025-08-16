@@ -1,6 +1,7 @@
 import * as admin from 'firebase-admin';
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../middleware/auth';
+import { CommissionConfigService } from '../services/commissionConfig';
 
 const db = admin.firestore();
 
@@ -75,7 +76,9 @@ export const getDownlineCompensation = async (req: AuthenticatedRequest, res: Re
       let childBase = 0;
       txSnap.forEach(t => { childBase += (t.data().baseCommission || 0); });
 
-      const rate = level === 'A' ? 0.10 : level === 'B' ? 0.075 : 0.05;
+      const cfg = await CommissionConfigService.getInstance().getConfigForPeriod(period);
+      const downRates = cfg.downlineRates || { A: 0.10, B: 0.075, C: 0.05 };
+      const rate = (downRates as any)[level] ?? (level === 'A' ? 0.10 : level === 'B' ? 0.075 : 0.05);
       const computed = (childBase || 0) * rate;
 
       // Booked (accrued) downline bonuses for THIS child and level
