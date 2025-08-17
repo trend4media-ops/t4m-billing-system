@@ -56,7 +56,7 @@ if (!admin.apps.length) {
 const app = express();
 
 // Allowed origins (Whitelist)
-const allowedOrigins = (process.env.CORS_ORIGINS || "https://trend4media-billing.web.app,https://trend4media-billing.firebaseapp.com,https://trend4media.web.app")
+const allowedOrigins = (process.env.CORS_ORIGINS || "https://trend4media-billing.web.app,https://trend4media-billing.firebaseapp.com,https://trend4media.web.app,https://www.tiktool.net,https://app.tiktool.net")
   .split(",")
   .map(s => s.trim())
   .filter(Boolean);

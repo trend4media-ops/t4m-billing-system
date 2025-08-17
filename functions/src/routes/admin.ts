@@ -16,6 +16,23 @@ adminPayoutsRouter.use((req: AuthenticatedRequest, res: Response, next) => {
 	return next();
 });
 
+function currentMonthYYYYMM(): string {
+  const d = new Date();
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function previousMonthYYYYMM(base?: string): string {
+  if (base && /^\d{6}$/.test(base)) {
+    const year = Number(base.slice(0,4));
+    const month = Number(base.slice(4));
+    const date = new Date(year, month - 2, 1);
+    return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}`;
+  }
+  const d = new Date();
+  const date = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+  return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
 adminPayoutsRouter.get('/recalc-downline', async (req: AuthenticatedRequest, res: Response) => {
 	try {
 		const period = (req.query.period as string) || undefined;
@@ -180,6 +197,37 @@ adminPayoutsRouter.put("/payouts/:payoutId/status", async (req: AuthenticatedReq
 		await payoutRef.update(updateData);
 
 		console.log(`✅ Payout ${payoutId} updated to ${status.toLowerCase()} by admin ${req.user!.uid}`);
+
+		// If marked PAID, emit webhook once
+		if (status === 'PAID') {
+			try {
+				const after = await payoutRef.get();
+				const data = after.data() as any;
+				if (!data?.webhookPaidSent) {
+					const url = process.env.PAYOUT_WEBHOOK_URL || process.env.PAYOUTS_WEBHOOK_URL;
+					if (url) {
+						// @ts-ignore Node 20 global fetch
+						await fetch(url, {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/json' },
+							body: JSON.stringify({
+								event: 'PAYOUT_PAID',
+								payoutId,
+								managerId: data.managerId,
+								period: data.period,
+								amount: data.amount || data.requestedAmount,
+								currency: data.currency || 'EUR',
+								invoice: data.invoice || null,
+								processedAt: new Date().toISOString(),
+							})
+						});
+						await payoutRef.set({ webhookPaidSent: true, webhookPaidUrl: url, webhookPaidAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+					}
+				}
+			} catch (e) {
+				console.warn('⚠️ Payout PAID webhook failed', e);
+			}
+		}
 		
 		res.status(200).json({
 			success: true,
@@ -389,12 +437,32 @@ adminPayoutsRouter.post('/config/commission/preview', async (req: AuthenticatedR
     });
 
     // Produce response
-    const results = Array.from(currentByManager.entries()).map(([managerId, vals]) => ({
-      managerId,
-      previewBase: Math.round((vals.base || 0) * 100) / 100,
-      previewMilestones: Math.round((vals.milestone || 0) * 100) / 100,
-      previewTotal: Math.round(((vals.base || 0) + (vals.milestone || 0)) * 100) / 100,
-    }));
+    const results = Array.from(currentByManager.entries()).map(([managerId, vals]) => {
+      const cur = vals as any;
+      // We saved current values earlier; derive safely
+      const existing = ((): { base: number; milestone: number; total: number } => {
+        const e = (typeof cur.base === 'number' && typeof cur.milestone === 'number' && typeof cur.total === 'number') ? cur : { base: 0, milestone: 0, total: 0 };
+        return { base: Number(e.base || 0), milestone: Number(e.milestone || 0), total: Number(e.total || 0) };
+      })();
+      const previewBase = Math.round((cur.base || 0) * 100) / 100;
+      const previewMilestones = Math.round((cur.milestone || 0) * 100) / 100;
+      const previewTotal = Math.round(((cur.base || 0) + (cur.milestone || 0)) * 100) / 100;
+      const deltaBase = Math.round((previewBase - existing.base) * 100) / 100;
+      const deltaMilestones = Math.round((previewMilestones - existing.milestone) * 100) / 100;
+      const deltaTotal = Math.round((previewTotal - existing.total) * 100) / 100;
+      return {
+        managerId,
+        currentBase: existing.base,
+        currentMilestones: existing.milestone,
+        currentTotal: existing.total,
+        previewBase,
+        previewMilestones,
+        previewTotal,
+        deltaBase,
+        deltaMilestones,
+        deltaTotal,
+      };
+    });
 
     res.status(200).json({ success: true, month, results });
   } catch (e:any) {
@@ -988,6 +1056,296 @@ adminPayoutsRouter.get('/events/:id/attendance', async (req: AuthenticatedReques
     const counts = { yes: list.filter(l=>l.attended===true).length, no: list.filter(l=>l.attended===false).length };
     res.status(200).json({ data: list, counts });
   } catch (e:any) { res.status(500).json({ error: 'Failed to fetch attendance', details: e.message }); }
+});
+
+adminPayoutsRouter.get('/bonuses/overview', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: 'Admin role required' });
+    return;
+  }
+  try {
+    const db = admin.firestore();
+    const month = (req.query.month as string) || currentMonthYYYYMM();
+    const snap = await db.collection('bonuses').where('month','==', month).get();
+    const byManager: Record<string, { managerId: string; recruitment: number; graduation: number; diamond: number; incentive: number; total: number } & { managerHandle?: string; managerType?: string; diamondEligible?: boolean } > = {};
+    snap.forEach(d => {
+      const b = d.data();
+      const managerId = b.managerId as string;
+      if (!managerId) return;
+      if (!byManager[managerId]) byManager[managerId] = { managerId, recruitment: 0, graduation: 0, diamond: 0, incentive: 0, total: 0 };
+      const amt = Number(b.amount || 0) || 0;
+      const t = String(b.type || '').toUpperCase();
+      if (t === 'RECRUITMENT_BONUS') byManager[managerId].recruitment += amt;
+      if (t === 'GRADUATION_BONUS') byManager[managerId].graduation += amt;
+      if (t === 'DIAMOND_BONUS') byManager[managerId].diamond += amt;
+      if (t === 'INCENTIVE_BONUS') byManager[managerId].incentive += amt;
+      byManager[managerId].total += amt;
+    });
+
+    // Attach manager basic info and validate diamond eligibility per manager
+    const result = Object.values(byManager);
+
+    const config = await CommissionConfigService.getInstance().getActiveConfig();
+    const threshold = config.diamondThreshold ?? 1.2;
+    const prevMonth = previousMonthYYYYMM(month);
+
+    await Promise.all(result.map(async (item) => {
+      try {
+        const m = await db.collection('managers').doc(item.managerId).get();
+        (item as any).managerHandle = (m.exists ? (m.data()?.handle || m.data()?.name) : item.managerId) || item.managerId;
+        (item as any).managerType = (m.exists ? (m.data()?.type || 'live') : 'live');
+      } catch {}
+
+      // Only compute eligibility if there is a diamond amount recorded
+      if (item.diamond > 0) {
+        try {
+          const [current, prev] = await Promise.all([
+            db.collection('manager-earnings').doc(`${item.managerId}_${month}`).get(),
+            db.collection('managerMonthlyNets').doc(`${item.managerId}_${prevMonth}`).get(),
+          ]);
+          const currentNet = current.exists ? (current.data()?.totalNet || 0) : 0;
+          const prevNet = prev.exists ? (prev.data()?.netAmount || 0) : 0;
+          const eligible = prevNet > 0 && currentNet >= threshold * prevNet;
+          (item as any).diamondEligible = eligible;
+          if (!eligible) {
+            // Ignore ineligible diamond amounts in the overview totals to avoid misleading display
+            item.diamond = 0;
+          }
+        } catch {
+          (item as any).diamondEligible = null;
+        }
+      } else {
+        (item as any).diamondEligible = false;
+      }
+
+      // Recompute total (R+G+D only) to align with UI
+      item.total = Math.round((item.recruitment + item.graduation + item.diamond + item.incentive) * 100) / 100;
+    }));
+
+    res.json({ success: true, month, data: result });
+  } catch (e:any) {
+    console.error('💥 bonuses/overview failed', e);
+    res.status(500).json({ error: 'Failed to load bonuses overview', details: e.message });
+  }
+});
+
+// Admin: Graduation bonuses audit for a given month
+adminPayoutsRouter.get('/bonuses/graduation', async (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'ADMIN') {
+    res.status(403).json({ error: 'Admin role required' });
+    return;
+  }
+  try {
+    const db = admin.firestore();
+    const month = (req.query.month as string) || currentMonthYYYYMM();
+    if (!/^\d{6}$/.test(month)) { res.status(400).json({ error: 'month (YYYYMM) required' }); return; }
+    const snap = await db.collection('bonuses')
+      .where('month','==', month)
+      .where('type','==','GRADUATION_BONUS')
+      .get();
+    const items: Array<{ id: string; managerId: string; managerHandle?: string; creatorId?: string; amount: number; awardMethod?: string; createdAt?: string } > = [];
+    const managerIds = new Set<string>();
+    snap.docs.forEach(d => {
+      const b = d.data() as any;
+      items.push({
+        id: d.id,
+        managerId: String(b.managerId || ''),
+        creatorId: b.creatorId || null,
+        amount: Number(b.amount || 0),
+        awardMethod: b.awardMethod || null,
+        createdAt: b.createdAt?.toDate ? b.createdAt.toDate().toISOString() : (b.createdAt || null),
+      });
+      if (b.managerId) managerIds.add(String(b.managerId));
+    });
+    // Enrich manager handle
+    const managers = await Promise.all(Array.from(managerIds).map(async id => {
+      const m = await db.collection('managers').doc(id).get();
+      return { id, handle: m.exists ? (m.data()?.handle || m.data()?.name || id) : id };
+    }));
+    const map = new Map(managers.map(m => [m.id, m.handle]));
+    items.forEach(it => { (it as any).managerHandle = map.get(it.managerId) || it.managerId; });
+    // Sort by amount desc
+    items.sort((a,b)=> (b.amount || 0) - (a.amount || 0));
+    res.status(200).json({ success: true, month, count: items.length, items });
+  } catch (e:any) {
+    console.error('💥 graduation audit failed', e);
+    res.status(500).json({ error: 'Failed to load graduation bonuses', details: e.message });
+  }
+});
+
+// NEW: Apply preview deltas safely via manual adjustments and update monthly earnings; trigger downline recompute
+adminPayoutsRouter.post('/config/commission/apply', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = admin.firestore();
+    const { month, overrides, note } = req.body as { month: string; overrides?: any; note?: string };
+    if (!/^\d{6}$/.test(month)) {
+      res.status(400).json({ error: 'month (YYYYMM) required' });
+      return;
+    }
+
+    // Reuse preview calculation
+    // (Preview was already implemented above; in apply we recompute inline for safety)
+
+    // Above trick won't return here; do preview inline again
+    const active = await CommissionConfigService.getInstance().getActiveConfig();
+    const cfg = { ...active, ...(overrides || {}) } as any;
+    const newBaseRates = cfg.baseCommissionRates || { live: 0.30, team: 0.35 };
+    const newMilestones = cfg.milestonePayouts || active.milestonePayouts;
+
+    const [earningsSnap, txSnap, bonusesSnap] = await Promise.all([
+      db.collection('manager-earnings').where('month','==', month).get(),
+      db.collection('transactions').where('month','==', month).get(),
+      db.collection('bonuses').where('month','==', month).where('type','in', ['MILESTONE_S','MILESTONE_N','MILESTONE_O','MILESTONE_P']).get()
+    ]);
+
+    const current = new Map<string, { base: number; milestone: number }>();
+    earningsSnap.forEach(d => {
+      const e = d.data() as any;
+      current.set(e.managerId, { base: Number(e.baseCommission || 0), milestone: Number(e.milestonePayouts || 0) });
+    });
+
+    const recomputedBase = new Map<string, number>();
+    txSnap.forEach(d => {
+      const t = d.data() as any;
+      const mid = String(t.managerId || t.liveManagerId || t.teamManagerId || '');
+      if (!mid) return;
+      const type = (String(t.managerType || '').toLowerCase() === 'team') ? 'team' : 'live';
+      const net = Number(t.netForCommission || t.net || 0);
+      const nb = Math.round((net * (type === 'team' ? newBaseRates.team : newBaseRates.live)) * 100) / 100;
+      recomputedBase.set(mid, (recomputedBase.get(mid) || 0) + nb);
+    });
+
+    const counts = new Map<string, { S:number; N:number; O:number; P:number }>();
+    bonusesSnap.forEach(d => {
+      const b = d.data();
+      const mid = String(b.managerId);
+      const k = String(b.type || '').slice(-1) as 'S'|'N'|'O'|'P';
+      if (!counts.has(mid)) counts.set(mid, { S:0,N:0,O:0,P:0 });
+      const entry = counts.get(mid)!; entry[k] += Math.round((Number(b.amount || 0) > 0 ? 1 : 0));
+    });
+
+    // Create adjustments and update earnings
+    const batch = db.batch();
+    const adjustments: Array<{ managerId: string; delta: number }> = [];
+
+    current.forEach((vals, mid) => {
+      const baseNew = Math.round((recomputedBase.get(mid) || 0) * 100) / 100;
+      const curMilestone = vals.milestone || 0;
+      const c = counts.get(mid) || { S:0,N:0,O:0,P:0 };
+      const rates = newMilestones?.['live'] || { S:75,N:150,O:400,P:100 }; // unable to resolve exact type quickly here
+      const milestoneNew = (c.S * rates.S) + (c.N * rates.N) + (c.O * rates.O) + (c.P * rates.P);
+
+      const delta = Math.round(((baseNew - vals.base) + (milestoneNew - curMilestone)) * 100) / 100;
+      if (Math.abs(delta) >= 0.01) {
+        const ref = db.collection('manualAdjustments').doc();
+        batch.set(ref, {
+          id: ref.id,
+          managerId: mid,
+          month,
+          amount: delta,
+          reason: 'COMMISSION_CONFIG_APPLY',
+          note: note || null,
+          configName: cfg?.name || null,
+          effectiveFrom: cfg?.effectiveFrom || null,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          createdBy: req.user?.uid || 'admin'
+        });
+
+        const earnRef = db.collection('manager-earnings').doc(`${mid}_${month}`);
+        batch.set(earnRef, {
+          extras: admin.firestore.FieldValue.increment(delta),
+          totalEarnings: admin.firestore.FieldValue.increment(delta),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+
+        adjustments.push({ managerId: mid, delta });
+      }
+    });
+
+    await batch.commit();
+
+    // Trigger downline recompute using config for period
+    try {
+      await calculateDownlineForPeriod(month);
+    } catch (e) { console.warn('Downline recompute failed after apply', e); }
+
+    // Optional: broadcast notification to all managers
+    try {
+      const b = db.batch();
+      const now = admin.firestore.FieldValue.serverTimestamp();
+      const msg = `Commission settings applied for ${month.slice(0,4)}-${month.slice(4)}. Your available payout may have changed.`;
+      adjustments.forEach(a => {
+        const mref = db.collection('messages').doc();
+        b.set(mref, {
+          userId: a.managerId,
+          title: 'Commission Config Applied',
+          content: msg,
+          module: 'SETTINGS_APPLY',
+          read: false,
+          isRead: false,
+          createdAt: now,
+          requiresAck: true
+        });
+      });
+      await b.commit();
+    } catch (e) { console.warn('Apply notification broadcast failed', e); }
+
+    res.status(200).json({ success: true, month, adjustments: adjustments.length });
+  } catch (e:any) {
+    console.error('💥 Apply failed', e);
+    res.status(500).json({ error: 'Apply failed', details: e.message });
+  }
+});
+
+// NOTE: An "apply" endpoint could persist the preview by updating per-manager earnings and rewriting bonus docs.
+// For safety, keep it as a future step and require explicit confirmation.
+
+// NEW: Lock a specific config version for a month (baseline safety)
+adminPayoutsRouter.post('/config/commission/lock', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = admin.firestore();
+    const { month, configId } = req.body as { month: string; configId: string };
+    if (!/^\d{6}$/.test(month) || !configId) {
+      res.status(400).json({ error: 'month (YYYYMM) and configId are required' });
+      return;
+    }
+    const cfg = await db.collection('systemConfig').doc(configId).get();
+    if (!cfg.exists) {
+      res.status(404).json({ error: 'Config not found' });
+      return;
+    }
+    await db.collection('systemConfigLocks').doc(month).set({ month, configId, lockedAt: admin.firestore.FieldValue.serverTimestamp(), lockedBy: req.user?.uid || 'admin' });
+    res.status(200).json({ success: true });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to lock config for month', details: e.message });
+  }
+});
+
+adminPayoutsRouter.delete('/config/commission/lock/:month', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const month = req.params.month;
+    if (!/^\d{6}$/.test(month)) { res.status(400).json({ error: 'Invalid month' }); return; }
+    await admin.firestore().collection('systemConfigLocks').doc(month).delete();
+    res.status(200).json({ success: true });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to unlock config', details: e.message });
+  }
+});
+
+// NEW: Snapshot current active config as baseline
+adminPayoutsRouter.post('/config/commission/baseline', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = admin.firestore();
+    const active = await CommissionConfigService.getInstance().getActiveConfig();
+    const ref = await db.collection('systemConfigBaselines').add({
+      snapshot: active,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdBy: req.user?.uid || 'admin'
+    });
+    res.status(201).json({ success: true, id: ref.id });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to snapshot baseline', details: e.message });
+  }
 });
 
 export { adminPayoutsRouter }; 

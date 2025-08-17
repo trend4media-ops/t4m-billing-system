@@ -33,6 +33,8 @@ import { getProfile, changePassword, changeEmail, updateBank, adminUpdateManager
 import { getEarningsHistory } from "../managers/getEarningsHistory";
 import { getAvailableMonths } from "../managers/getAvailableMonths";
 import multer from "multer";
+import { createCheckoutSession, getPortalLink, stripeWebhook } from "../billing";
+import { listInvoices, getWebhookHealth } from "../billing";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -77,8 +79,34 @@ apiRouter.get("/health", async (req, res) => {
     }
 });
 
+// Stripe webhook must be public (no auth)
+apiRouter.post('/billing/webhook', stripeWebhook);
+
 // All other API routes are protected
 apiRouter.use(authMiddleware);
+
+// --- BILLING ---
+apiRouter.post('/billing/checkout', createCheckoutSession);
+apiRouter.get('/billing/portal', getPortalLink);
+apiRouter.get('/billing/invoices', listInvoices);
+apiRouter.get('/billing/webhook/health', getWebhookHealth);
+
+// Tenants: return current user's tenant (MVP: owner == tenantId)
+apiRouter.get('/tenants/me', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!req.user) { res.status(401).json({ error: 'Unauthorized' }); return; }
+    const tenantId = req.user.uid;
+    const snap = await admin.firestore().collection('tenants').doc(tenantId).get();
+    if (!snap.exists) {
+      res.status(200).json({ success: true, tenant: { id: tenantId, status: 'inactive' } });
+      return;
+    }
+    const t = snap.data() as any;
+    res.status(200).json({ success: true, tenant: { id: tenantId, status: t.status || 'inactive', plan: t.plan || null, subscriptionId: t.subscriptionId || null } });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to load tenant', details: e.message });
+  }
+});
 
 // --- PROFILE / AUTH ---
 apiRouter.get('/auth/profile', getProfile);

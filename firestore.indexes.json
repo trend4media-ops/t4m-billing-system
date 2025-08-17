@@ -105,6 +105,14 @@
         { "fieldPath": "managerId", "order": "ASCENDING" },
         { "fieldPath": "period", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "creatorMilestones",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "creatorId", "order": "ASCENDING" },
+        { "fieldPath": "month", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

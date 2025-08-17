@@ -905,6 +905,8 @@ export async function processCommissionData(rows: any[][], batchId: string, mont
   
   // Aggregate per manager (for creators count etc.)
   const perManager: Record<string, { type: 'live' | 'team'; creators: Set<string>; milestones: {S:number;N:number;O:number;P:number} }> = {};
+  // Track per-creator milestone flags for this month (for graduation bonus and history)
+  const creatorMonthFlags = new Map<string, { managerId: string; managerType: 'live'|'team'; S: boolean; N: boolean; O: boolean; P: boolean }>();
   
   // Progress tracking
   const totalDataRows = rows.slice(1).length;
@@ -977,6 +979,17 @@ export async function processCommissionData(rows: any[][], batchId: string, mont
       }
       const creatorId = row[1]?.toString() || 'unknown';
       perManager[managerId].creators.add(creatorId);
+      // Aggregate milestone flags per creator for this month
+      if (hasS || hasN || hasO || hasP) {
+        const current = creatorMonthFlags.get(creatorId) || { managerId, managerType, S: false, N: false, O: false, P: false };
+        current.managerId = managerId;
+        current.managerType = managerType;
+        current.S = current.S || hasS;
+        current.N = current.N || hasN;
+        current.O = current.O || hasO;
+        current.P = current.P || hasP;
+        creatorMonthFlags.set(creatorId, current);
+      }
 
       // Only write transaction when gross > 0
       if (grossAmount > 0) {
@@ -1001,6 +1014,7 @@ export async function processCommissionData(rows: any[][], batchId: string, mont
           deductions,
           netForCommission,
           baseCommission,
+          milestones: { S: hasS, N: hasN, O: hasO, P: hasP },
           month,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           processed: true
@@ -1127,5 +1141,61 @@ export async function processCommissionData(rows: any[][], batchId: string, mont
     await fixBatch.commit();
   } catch (e) {
     console.warn('⚠️ Milestone validation skipped due to error', e);
+  }
+
+  // GRADUATION: award first-time milestone per creator (history across months)
+  try {
+    const BATCH_LIMIT = 450;
+    let batch = firestore.batch();
+    let ops = 0;
+    for (const [creatorId, flags] of creatorMonthFlags.entries()) {
+      const hasAny = (flags.S || flags.N || flags.O || flags.P);
+      if (!hasAny) continue;
+      // Persist monthly milestone snapshot per creator
+      const cmRef = firestore.collection('creatorMilestones').doc(`${creatorId}_${month}`);
+      batch.set(cmRef, {
+        creatorId,
+        month,
+        managerId: flags.managerId,
+        managerType: flags.managerType.toUpperCase(),
+        S: !!flags.S,
+        N: !!flags.N,
+        O: !!flags.O,
+        P: !!flags.P,
+        hasAny: true,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      ops++;
+      // Check if this creator had any milestone before this month
+      const priorSnap = await firestore.collection('creatorMilestones').where('creatorId','==', creatorId).get();
+      let hadPrior = false;
+      priorSnap.forEach(d => {
+        const data = d.data() as any;
+        const m = String(data.month || '');
+        const prevHas = Boolean(data.hasAny);
+        if (prevHas && m < month) {
+          hadPrior = true;
+        }
+      });
+      if (!hadPrior) {
+        const payoutAmount = (cfg?.graduationBonusPayouts?.[flags.managerType] ?? (flags.managerType === 'team' ? 60 : 50));
+        const bonusId = `${flags.managerId}_${month}_GRADUATION_BONUS_${creatorId}`;
+        const bonusRef = firestore.collection('bonuses').doc(bonusId);
+        batch.set(bonusRef, {
+          managerId: flags.managerId,
+          month,
+          type: 'GRADUATION_BONUS',
+          amount: payoutAmount,
+          creatorId,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          awardMethod: 'AUTO_GRADUATION'
+        });
+        ops++;
+      }
+      if (ops >= BATCH_LIMIT) { await batch.commit(); batch = firestore.batch(); ops = 0; }
+    }
+    if (ops > 0) await batch.commit();
+  } catch (e) {
+    console.warn('⚠️ Graduation bonus awarding skipped due to error', e);
   }
 } 
