@@ -58,14 +58,30 @@ export class CommissionConfigService {
     return this.cached;
   }
 
-  // NEW: Resolve config for a specific period (YYYYMM). Falls back to active/defaults.
+  // NEW: Resolve config for a specific period (YYYYMM). Prefers lock → then effectiveFrom → then active/defaults.
   async getConfigForPeriod(period: string): Promise<SystemConfig> {
+    const db = admin.firestore();
+    // 1) Check explicit lock override for the period
     try {
-      const db = admin.firestore();
+      const lockDoc = await db.collection('systemConfigLocks').doc(period).get();
+      if (lockDoc.exists) {
+        const lock = lockDoc.data() as any;
+        const configId = String(lock?.configId || '');
+        if (configId) {
+          const cfgSnap = await db.collection('systemConfig').doc(configId).get();
+          if (cfgSnap.exists) {
+            return this.withDefaults(cfgSnap.data() as SystemConfig);
+          }
+        }
+      }
+    } catch {}
+
+    // 2) Select by effectiveFrom
+    try {
       const snap = await db
         .collection('systemConfig')
         .orderBy('effectiveFrom', 'desc')
-        .limit(20)
+        .limit(50)
         .get();
       if (!snap.empty) {
         const configs = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) as Array<SystemConfig & { id: string }>;
@@ -73,6 +89,8 @@ export class CommissionConfigService {
         if (chosen) return this.withDefaults(chosen);
       }
     } catch {}
+
+    // 3) Active/default
     return this.getActiveConfig();
   }
 

@@ -4,6 +4,7 @@ import { Response } from "express";
 import * as admin from "firebase-admin";
 import { calculateDownlineForPeriod } from "../downline-calculator";
 import { CommissionConfigService } from '../services/commissionConfig';
+import multer from 'multer';
 
 const adminPayoutsRouter = Router();
 
@@ -528,5 +529,465 @@ adminPayoutsRouter.post('/config/commission/apply', async (req: AuthenticatedReq
 
 // NOTE: An "apply" endpoint could persist the preview by updating per-manager earnings and rewriting bonus docs.
 // For safety, keep it as a future step and require explicit confirmation.
+
+// NEW: Lock a specific config version for a month (baseline safety)
+adminPayoutsRouter.post('/config/commission/lock', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = admin.firestore();
+    const { month, configId } = req.body as { month: string; configId: string };
+    if (!/^\d{6}$/.test(month) || !configId) {
+      res.status(400).json({ error: 'month (YYYYMM) and configId are required' });
+      return;
+    }
+    const cfg = await db.collection('systemConfig').doc(configId).get();
+    if (!cfg.exists) {
+      res.status(404).json({ error: 'Config not found' });
+      return;
+    }
+    await db.collection('systemConfigLocks').doc(month).set({ month, configId, lockedAt: admin.firestore.FieldValue.serverTimestamp(), lockedBy: req.user?.uid || 'admin' });
+    res.status(200).json({ success: true });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to lock config for month', details: e.message });
+  }
+});
+
+adminPayoutsRouter.delete('/config/commission/lock/:month', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const month = req.params.month;
+    if (!/^\d{6}$/.test(month)) { res.status(400).json({ error: 'Invalid month' }); return; }
+    await admin.firestore().collection('systemConfigLocks').doc(month).delete();
+    res.status(200).json({ success: true });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to unlock config', details: e.message });
+  }
+});
+
+// NEW: Snapshot current active config as baseline
+adminPayoutsRouter.post('/config/commission/baseline', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = admin.firestore();
+    const active = await CommissionConfigService.getInstance().getActiveConfig();
+    const ref = await db.collection('systemConfigBaselines').add({
+      snapshot: active,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdBy: req.user?.uid || 'admin'
+    });
+    res.status(201).json({ success: true, id: ref.id });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to snapshot baseline', details: e.message });
+  }
+});
+
+// --- EVENTS (ADMIN) ---
+adminPayoutsRouter.get('/events', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const snap = await admin.firestore().collection('events').orderBy('startAt','desc').limit(200).get();
+    const items = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    res.status(200).json({ data: items });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to list events', details: e.message });
+  }
+});
+
+adminPayoutsRouter.post('/events', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { title, description, startAt, endAt, audience, recipients, requireAck } = req.body as any;
+    if (!title || !startAt) { res.status(400).json({ error: 'title and startAt required' }); return; }
+    const ref = admin.firestore().collection('events').doc();
+    const payload = {
+      id: ref.id,
+      title: String(title),
+      description: description ? String(description) : '',
+      startAt: new Date(startAt),
+      endAt: endAt ? new Date(endAt) : null,
+      audience: audience || 'ALL',
+      recipients: Array.isArray(recipients) ? recipients.slice(0,500) : [],
+      requireAck: Boolean(requireAck),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdBy: req.user?.uid || 'admin'
+    } as any;
+    await ref.set(payload);
+    res.status(201).json({ success: true, event: payload });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to create event', details: e.message });
+  }
+});
+
+adminPayoutsRouter.put('/events/:id', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const update: any = {};
+    ['title','description','audience','requireAck'].forEach(k => { if (k in req.body) update[k] = req.body[k]; });
+    if ('startAt' in req.body) update.startAt = new Date(req.body.startAt);
+    if ('endAt' in req.body) update.endAt = req.body.endAt ? new Date(req.body.endAt) : null;
+    await admin.firestore().collection('events').doc(id).set(update, { merge: true });
+    res.status(200).json({ success: true });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to update event', details: e.message });
+  }
+});
+
+adminPayoutsRouter.delete('/events/:id', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    await admin.firestore().collection('events').doc(id).delete();
+    res.status(200).json({ success: true });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to delete event', details: e.message });
+  }
+});
+
+adminPayoutsRouter.post('/events/:id/notify', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { recipients } = req.body as { recipients?: string[] };
+    const db = admin.firestore();
+    const ev = await db.collection('events').doc(id).get();
+    if (!ev.exists) { res.status(404).json({ error: 'Event not found' }); return; }
+    const e = ev.data() as any;
+    // Determine audience
+    let targetIds: string[] = [];
+    if (Array.isArray(recipients) && recipients.length > 0) targetIds = recipients;
+    else if (Array.isArray(e.recipients) && e.recipients.length > 0) targetIds = e.recipients;
+    else {
+      const mgrSnap = await db.collection('managers').get();
+      targetIds = mgrSnap.docs.map(d => d.id);
+    }
+    if (targetIds.length === 0) { res.status(400).json({ error: 'No recipients' }); return; }
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const batch = db.batch();
+    targetIds.forEach(uid => {
+      const ref = db.collection('messages').doc();
+      batch.set(ref, {
+        userId: uid,
+        title: `Event: ${e.title}`,
+        content: `${e.description || ''}\n\nStarts: ${e.startAt?.toDate ? e.startAt.toDate().toISOString() : e.startAt}`,
+        module: 'EVENT',
+        read: false,
+        isRead: false,
+        requiresAck: Boolean(e.requireAck),
+        eventId: id,
+        createdAt: now,
+        senderId: req.user?.uid || 'admin',
+        senderRole: 'ADMIN'
+      });
+    });
+    await batch.commit();
+    res.status(200).json({ success: true, notified: targetIds.length });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to notify', details: e.message });
+  }
+});
+
+// --- INCENTIVES (ADMIN) ---
+adminPayoutsRouter.get('/incentives/rules', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const snap = await admin.firestore().collection('incentiveRules').orderBy('createdAt','desc').limit(200).get();
+    res.status(200).json({ data: snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to list rules', details: e.message });
+  }
+});
+
+adminPayoutsRouter.post('/incentives/rules', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { name, type, percentIncrease, amounts, active, effectiveFrom } = req.body as any;
+    if (!name || type !== 'NET_GROWTH_PERCENT' || typeof percentIncrease !== 'number') {
+      res.status(400).json({ error: 'name, type=NET_GROWTH_PERCENT and percentIncrease required' });
+      return;
+    }
+    const payload = {
+      name: String(name),
+      type: 'NET_GROWTH_PERCENT',
+      percentIncrease: Number(percentIncrease),
+      amounts: amounts || { live: 50, team: 50 },
+      active: active !== false,
+      effectiveFrom: typeof effectiveFrom === 'string' ? effectiveFrom : null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdBy: req.user?.uid || 'admin'
+    };
+    const ref = await admin.firestore().collection('incentiveRules').add(payload);
+    res.status(201).json({ success: true, id: ref.id });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to create rule', details: e.message });
+  }
+});
+
+adminPayoutsRouter.post('/incentives/preview', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { month } = req.body as { month: string };
+    if (!/^\d{6}$/.test(month)) { res.status(400).json({ error: 'month (YYYYMM) required' }); return; }
+    const db = admin.firestore();
+    const rulesSnap = await db.collection('incentiveRules').where('active','==', true).get();
+    const rules = rulesSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    const earningsSnap = await db.collection('manager-earnings').where('month','==', month).get();
+
+    // Load prev month nets
+    const prevMonth = (() => { const y=+month.slice(0,4), m=+month.slice(4); const d=new Date(y, m-2, 1); return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`; })();
+    const prevNetsSnap = await db.collection('managerMonthlyNets').where('month','==', prevMonth).get();
+    const prevByManager = new Map<string, number>();
+    prevNetsSnap.forEach(doc => { const data = doc.data() as any; prevByManager.set(data.managerId, Number(data.netAmount || 0)); });
+
+    // Compute incentives
+    const results: Array<{ managerId: string; amount: number; ruleId: string }> = [];
+    earningsSnap.forEach(doc => {
+      const e = doc.data() as any;
+      const managerId = e.managerId as string;
+      const managerType = String(e.managerType || 'live').toLowerCase() === 'team' ? 'team' : 'live';
+      const currentNet = Number(e.totalNet || 0);
+      const prevNet = prevByManager.get(managerId) || 0;
+      rules.forEach((r:any) => {
+        if (r.type === 'NET_GROWTH_PERCENT') {
+          const required = prevNet * (1 + Number(r.percentIncrease || 0) / 100);
+          if (prevNet > 0 && currentNet >= required) {
+            const amt = Number(r.amounts?.[managerType] || 0);
+            if (amt > 0) results.push({ managerId, amount: amt, ruleId: r.id });
+          }
+        }
+      });
+    });
+
+    res.status(200).json({ success: true, month, results });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to preview incentives', details: e.message });
+  }
+});
+
+adminPayoutsRouter.post('/incentives/apply', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { month } = req.body as { month: string };
+    if (!/^\d{6}$/.test(month)) { res.status(400).json({ error: 'month (YYYYMM) required' }); return; }
+    const db = admin.firestore();
+
+    // Compute preview as above
+    const [rulesSnap, earningsSnap] = await Promise.all([
+      db.collection('incentiveRules').where('active','==', true).get(),
+      db.collection('manager-earnings').where('month','==', month).get(),
+    ]);
+    const rules = rulesSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    const prevMonth = (() => { const y=+month.slice(0,4), m=+month.slice(4); const d=new Date(y, m-2, 1); return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`; })();
+    const prevNetsSnap = await db.collection('managerMonthlyNets').where('month','==', prevMonth).get();
+    const prevByManager = new Map<string, number>();
+    prevNetsSnap.forEach(doc => { const data = doc.data() as any; prevByManager.set(data.managerId, Number(data.netAmount || 0)); });
+
+    const toApply: Array<{ managerId: string; amount: number; ruleId: string }> = [];
+    earningsSnap.forEach(doc => {
+      const e = doc.data() as any;
+      const managerId = e.managerId as string;
+      const managerType = String(e.managerType || 'live').toLowerCase() === 'team' ? 'team' : 'live';
+      const currentNet = Number(e.totalNet || 0);
+      const prevNet = prevByManager.get(managerId) || 0;
+      rules.forEach((r:any) => {
+        if (r.type === 'NET_GROWTH_PERCENT') {
+          const required = prevNet * (1 + Number(r.percentIncrease || 0) / 100);
+          if (prevNet > 0 && currentNet >= required) {
+            const amt = Number(r.amounts?.[managerType] || 0);
+            if (amt > 0) toApply.push({ managerId, amount: amt, ruleId: r.id });
+          }
+        }
+      });
+    });
+
+    // Apply bonuses & update earnings
+    const b = db.batch();
+    toApply.forEach(item => {
+      const bonusId = `${item.managerId}_${month}_INCENTIVE_BONUS_${item.ruleId}`;
+      const ref = db.collection('bonuses').doc(bonusId);
+      b.set(ref, {
+        managerId: item.managerId,
+        month,
+        type: 'INCENTIVE_BONUS',
+        amount: item.amount,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: req.user?.uid || 'admin',
+        awardMethod: 'MANUAL',
+        ruleId: item.ruleId,
+        description: 'Incentive Bonus (rule-based)'
+      }, { merge: true });
+      const earnRef = db.collection('manager-earnings').doc(`${item.managerId}_${month}`);
+      b.set(earnRef, {
+        extras: admin.firestore.FieldValue.increment(item.amount),
+        totalEarnings: admin.firestore.FieldValue.increment(item.amount),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    });
+    await b.commit();
+
+    res.status(200).json({ success: true, applied: toApply.length });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to apply incentives', details: e.message });
+  }
+});
+
+// --- CREATORS (ADMIN CRM) ---
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+adminPayoutsRouter.get('/creators', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = admin.firestore();
+    const { status } = req.query as any;
+    let q: FirebaseFirestore.Query = db.collection('creators');
+    if (status) q = q.where('status','==', String(status));
+    const snap = await q.orderBy('createdAt','desc').limit(200).get();
+    res.status(200).json({ data: snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to list creators', details: e.message });
+  }
+});
+
+adminPayoutsRouter.post('/creators', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { handle, name, email, status, managerId } = req.body as any;
+    if (!handle || !name) { res.status(400).json({ error: 'handle and name required' }); return; }
+    const db = admin.firestore();
+    const ref = db.collection('creators').doc();
+    const payload = {
+      id: ref.id,
+      handle: String(handle),
+      name: String(name),
+      email: email ? String(email) : null,
+      status: (status || 'onboarding').toString().toLowerCase(),
+      managerId: managerId || null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    await ref.set(payload);
+    res.status(201).json({ success: true, creator: payload });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to create creator', details: e.message });
+  }
+});
+
+adminPayoutsRouter.get('/creators/:id', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const snap = await admin.firestore().collection('creators').doc(req.params.id).get();
+    if (!snap.exists) { res.status(404).json({ error: 'Not found' }); return; }
+    res.status(200).json({ data: { id: snap.id, ...(snap.data() as any) } });
+  } catch (e:any) { res.status(500).json({ error: 'Failed to get creator', details: e.message }); }
+});
+
+adminPayoutsRouter.put('/creators/:id', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const update: any = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+    ['handle','name','email','status','managerId'].forEach(k => { if (k in req.body) update[k] = req.body[k]; });
+    await admin.firestore().collection('creators').doc(req.params.id).set(update, { merge: true });
+    res.status(200).json({ success: true });
+  } catch (e:any) { res.status(500).json({ error: 'Failed to update creator', details: e.message }); }
+});
+
+adminPayoutsRouter.delete('/creators/:id', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await admin.firestore().collection('creators').doc(req.params.id).delete();
+    res.status(200).json({ success: true });
+  } catch (e:any) { res.status(500).json({ error: 'Failed to delete creator', details: e.message }); }
+});
+
+// Docs upload
+adminPayoutsRouter.post('/creators/:id/docs', upload.single('file'), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const creatorId = req.params.id;
+    const file = (req as any).file as Express.Multer.File | undefined;
+    if (!file) { res.status(400).json({ error: 'file required' }); return; }
+    const isPdf = file.mimetype === 'application/pdf' || /\.pdf$/i.test(file.originalname || '');
+    const isImg = /^image\//.test(file.mimetype || '');
+    if (!isPdf && !isImg) { res.status(400).json({ error: 'Only PDF or images allowed' }); return; }
+    const bucket = admin.storage().bucket();
+    const safeName = (file.originalname || 'doc').replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const dest = `creator-docs/${creatorId}/${Date.now()}_${safeName}`;
+    const ref = bucket.file(dest);
+    await ref.save(file.buffer, { contentType: file.mimetype, resumable: false, public: false, metadata: { cacheControl: 'no-store' } });
+    const [url] = await ref.getSignedUrl({ action: 'read', expires: Date.now() + 1000*60*60*24*30 });
+    const docRef = admin.firestore().collection('creatorDocs').doc();
+    const payload = { id: docRef.id, creatorId, path: dest, fileName: file.originalname, contentType: file.mimetype, size: file.size, signedUrl: url, uploadedAt: admin.firestore.FieldValue.serverTimestamp(), uploadedBy: req.user?.uid || 'admin' };
+    await docRef.set(payload);
+    res.status(201).json({ success: true, doc: payload });
+  } catch (e:any) { res.status(500).json({ error: 'Failed to upload doc', details: e.message }); }
+});
+
+adminPayoutsRouter.get('/creators/:id/docs', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const snap = await admin.firestore().collection('creatorDocs').where('creatorId','==', req.params.id).orderBy('uploadedAt','desc').get();
+    res.status(200).json({ data: snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) });
+  } catch (e:any) { res.status(500).json({ error: 'Failed to list docs', details: e.message }); }
+});
+
+// Tasks
+adminPayoutsRouter.post('/creators/:id/tasks', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { title, type, dueAt, requiresAck } = req.body as any;
+    if (!title) { res.status(400).json({ error: 'title required' }); return; }
+    const ref = admin.firestore().collection('creatorTasks').doc();
+    const payload = { id: ref.id, creatorId: req.params.id, title: String(title), type: type || 'ONBOARDING', state: 'OPEN', dueAt: dueAt ? new Date(dueAt) : null, requiresAck: Boolean(requiresAck), createdAt: admin.firestore.FieldValue.serverTimestamp(), createdBy: req.user?.uid || 'admin' };
+    await ref.set(payload);
+    res.status(201).json({ success: true, task: payload });
+  } catch (e:any) { res.status(500).json({ error: 'Failed to create task', details: e.message }); }
+});
+
+adminPayoutsRouter.put('/creators/:id/tasks/:taskId', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { state } = req.body as any;
+    if (!state) { res.status(400).json({ error: 'state required' }); return; }
+    const update: any = { state: String(state), updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+    if (String(state).toUpperCase() === 'DONE') update.completedAt = admin.firestore.FieldValue.serverTimestamp();
+    await admin.firestore().collection('creatorTasks').doc(req.params.taskId).set(update, { merge: true });
+    res.status(200).json({ success: true });
+  } catch (e:any) { res.status(500).json({ error: 'Failed to update task', details: e.message }); }
+});
+
+adminPayoutsRouter.get('/creators/:id/tasks', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const snap = await admin.firestore().collection('creatorTasks').where('creatorId','==', req.params.id).orderBy('createdAt','desc').get();
+    res.status(200).json({ data: snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) });
+  } catch (e:any) { res.status(500).json({ error: 'Failed to list tasks', details: e.message }); }
+});
+
+// --- TARGETS ---
+adminPayoutsRouter.post('/targets', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { creatorId, month, netGoal } = req.body as { creatorId: string; month: string; netGoal: number };
+    if (!creatorId || !/^\d{6}$/.test(month)) { res.status(400).json({ error: 'creatorId and month (YYYYMM) required' }); return; }
+    const ref = admin.firestore().collection('creatorTargets').doc(`${creatorId}_${month}`);
+    await ref.set({ creatorId, month, netGoal: Number(netGoal || 0), updatedAt: admin.firestore.FieldValue.serverTimestamp(), updatedBy: req.user?.uid || 'admin' }, { merge: true });
+    res.status(200).json({ success: true });
+  } catch (e:any) { res.status(500).json({ error: 'Failed to set target', details: e.message }); }
+});
+
+adminPayoutsRouter.get('/targets', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { creatorId, month } = req.query as any;
+    const db = admin.firestore();
+    if (creatorId && month) {
+      const doc = await db.collection('creatorTargets').doc(`${creatorId}_${month}`).get();
+      res.status(200).json({ data: doc.exists ? doc.data() : null });
+      return;
+    }
+    let q: FirebaseFirestore.Query = db.collection('creatorTargets');
+    if (creatorId) q = q.where('creatorId','==', String(creatorId));
+    if (month) q = q.where('month','==', String(month));
+    const snap = await q.limit(200).get();
+    res.status(200).json({ data: snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) });
+  } catch (e:any) { res.status(500).json({ error: 'Failed to get targets', details: e.message }); }
+});
+
+// --- EVENT ATTENDANCE (ADMIN) ---
+adminPayoutsRouter.post('/events/:id/attendance', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { creatorId, attended } = req.body as { creatorId: string; attended: boolean };
+    if (!creatorId || typeof attended !== 'boolean') { res.status(400).json({ error: 'creatorId and attended required' }); return; }
+    const ref = admin.firestore().collection('eventAttendance').doc(`${id}_${creatorId}`);
+    await ref.set({ eventId: id, creatorId, attended: Boolean(attended), updatedAt: admin.firestore.FieldValue.serverTimestamp(), updatedBy: req.user?.uid || 'admin' }, { merge: true });
+    res.status(200).json({ success: true });
+  } catch (e:any) { res.status(500).json({ error: 'Failed to mark attendance', details: e.message }); }
+});
+
+adminPayoutsRouter.get('/events/:id/attendance', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const snap = await admin.firestore().collection('eventAttendance').where('eventId','==', req.params.id).get();
+    const list = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    const counts = { yes: list.filter(l=>l.attended===true).length, no: list.filter(l=>l.attended===false).length };
+    res.status(200).json({ data: list, counts });
+  } catch (e:any) { res.status(500).json({ error: 'Failed to fetch attendance', details: e.message }); }
+});
 
 export { adminPayoutsRouter }; 

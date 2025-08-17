@@ -590,22 +590,23 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
     const managersMap = new Map<string, any>();
     (managerDocSnaps || []).forEach(doc => { if (doc && doc.exists) managersMap.set(doc.id, doc.data()); });
 
-    const extrasByManager = new Map<string, { recruitment: number; graduation: number; diamond: number }>();
+    const extrasByManager = new Map<string, { recruitment: number; graduation: number; diamond: number; incentive: number }>();
     const downlineByManager = new Map<string, { a: number; b: number; c: number; total: number }>();
     if (bonusesSnap) {
       bonusesSnap.forEach((bDoc: any) => {
         const b = bDoc.data();
         const mid = String(b.managerId || '');
         if (!mid) return;
-        const entry = extrasByManager.get(mid) || { recruitment: 0, graduation: 0, diamond: 0 };
+        const entry = extrasByManager.get(mid) || { recruitment: 0, graduation: 0, diamond: 0, incentive: 0 };
         const t = String(b.type || '').toUpperCase();
         const amt = b.amount || 0;
         // Only include manual extras; ignore any AUTO_MILESTONE or other types
-        const isManual = String(b.awardMethod || '').toUpperCase() === 'MANUAL' || /^\w+_\d{6}_(RECRUITMENT_BONUS|GRADUATION_BONUS|DIAMOND_BONUS)$/.test(bDoc.id);
+        const isManual = String(b.awardMethod || '').toUpperCase() === 'MANUAL' || /^\w+_\d{6}_(RECRUITMENT_BONUS|GRADUATION_BONUS|DIAMOND_BONUS|INCENTIVE_BONUS)$/.test(bDoc.id);
         if (isManual) {
           if (t === 'RECRUITMENT_BONUS') entry.recruitment += amt;
           if (t === 'GRADUATION_BONUS') entry.graduation += amt;
           if (t === 'DIAMOND_BONUS') entry.diamond += amt;
+          if (t === 'INCENTIVE_BONUS') entry.incentive += amt;
           extrasByManager.set(mid, entry);
         }
 
@@ -708,7 +709,7 @@ apiRouter.get("/processed-managers/:month", async (req: AuthenticatedRequest, re
       const creatorCount = data.creatorCount || creatorCountsByManager.get(managerId) || 0;
 
       // Extras breakdown pre-aggregated
-      const extrasBreakdown = extrasByManager.get(managerId) || { recruitment: 0, graduation: 0, diamond: 0 };
+      const extrasBreakdown = extrasByManager.get(managerId) || { recruitment: 0, graduation: 0, diamond: 0, incentive: 0 };
 
       // Diamond eligibility using preloaded prev month net and config threshold
       let diamondEligible: boolean | null = null;
@@ -1534,17 +1535,18 @@ apiRouter.get('/bonuses/overview', async (req: AuthenticatedRequest, res: Respon
     const db = admin.firestore();
     const month = (req.query.month as string) || currentMonthYYYYMM();
     const snap = await db.collection('bonuses').where('month','==', month).get();
-    const byManager: Record<string, { managerId: string; recruitment: number; graduation: number; diamond: number; total: number } & { managerHandle?: string; managerType?: string; diamondEligible?: boolean } > = {};
+    const byManager: Record<string, { managerId: string; recruitment: number; graduation: number; diamond: number; incentive: number; total: number } & { managerHandle?: string; managerType?: string; diamondEligible?: boolean } > = {};
     snap.forEach(d => {
       const b = d.data();
       const managerId = b.managerId as string;
       if (!managerId) return;
-      if (!byManager[managerId]) byManager[managerId] = { managerId, recruitment: 0, graduation: 0, diamond: 0, total: 0 };
+      if (!byManager[managerId]) byManager[managerId] = { managerId, recruitment: 0, graduation: 0, diamond: 0, incentive: 0, total: 0 };
       const amt = Number(b.amount || 0) || 0;
       const t = String(b.type || '').toUpperCase();
       if (t === 'RECRUITMENT_BONUS') byManager[managerId].recruitment += amt;
       if (t === 'GRADUATION_BONUS') byManager[managerId].graduation += amt;
       if (t === 'DIAMOND_BONUS') byManager[managerId].diamond += amt;
+      if (t === 'INCENTIVE_BONUS') byManager[managerId].incentive += amt;
       byManager[managerId].total += amt;
     });
 
@@ -1585,7 +1587,7 @@ apiRouter.get('/bonuses/overview', async (req: AuthenticatedRequest, res: Respon
       }
 
       // Recompute total (R+G+D only) to align with UI
-      item.total = Math.round((item.recruitment + item.graduation + item.diamond) * 100) / 100;
+      item.total = Math.round((item.recruitment + item.graduation + item.diamond + item.incentive) * 100) / 100;
     }));
 
     res.json({ success: true, month, data: result });
@@ -1638,7 +1640,7 @@ apiRouter.delete('/bonuses/:managerId/:month/:type', async (req: AuthenticatedRe
     let newExtras = 0;
     remainingExtrasSnap.forEach(d => {
       const dt = String(d.data()?.type || '').toUpperCase();
-      if (dt === 'RECRUITMENT_BONUS' || dt === 'GRADUATION_BONUS' || dt === 'DIAMOND_BONUS') {
+      if (dt === 'RECRUITMENT_BONUS' || dt === 'GRADUATION_BONUS' || dt === 'DIAMOND_BONUS' || dt === 'INCENTIVE_BONUS') {
         newExtras += d.data()?.amount || 0;
       }
     });
@@ -1760,7 +1762,7 @@ apiRouter.post('/bonuses/cleanup/diamond', async (req: AuthenticatedRequest, res
       let newExtras = 0;
       extrasSnap.forEach(d => {
         const t = String(d.data()?.type || '').toUpperCase();
-        if (t === 'RECRUITMENT_BONUS' || t === 'GRADUATION_BONUS' || t === 'DIAMOND_BONUS') newExtras += (d.data()?.amount || 0);
+        if (t === 'RECRUITMENT_BONUS' || t === 'GRADUATION_BONUS' || t === 'DIAMOND_BONUS' || t === 'INCENTIVE_BONUS') newExtras += (d.data()?.amount || 0);
       });
       const earningsRef = db.collection('manager-earnings').doc(`${managerId}_${month}`);
       await db.runTransaction(async (tx) => {
@@ -2086,6 +2088,27 @@ apiRouter.get('/admin/managers/:managerId/adjustments', async (req: Authenticate
   } catch (e:any) {
     console.error('💥 list adjustments failed', e);
     res.status(500).json({ error: 'Failed to fetch adjustments', details: e.message });
+  }
+});
+
+// RSVP to an event (MANAGER)
+apiRouter.post('/events/:id/rsvp', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!req.user) { res.status(401).json({ error: 'Unauthorized' }); return; }
+    const { id } = req.params;
+    const { response } = req.body as { response: 'YES'|'NO'|'MAYBE' };
+    if (!response || !['YES','NO','MAYBE'].includes(response)) { res.status(400).json({ error: 'response required (YES|NO|MAYBE)' }); return; }
+    const db = admin.firestore();
+    const ref = db.collection('events').doc(id).collection('rsvps').doc(req.user.managerId || req.user.uid);
+    await ref.set({
+      userId: req.user.managerId || req.user.uid,
+      role: req.user.role || 'MANAGER',
+      response,
+      respondedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    res.status(200).json({ success: true });
+  } catch (e:any) {
+    res.status(500).json({ error: 'Failed to RSVP', details: e.message });
   }
 });
 
